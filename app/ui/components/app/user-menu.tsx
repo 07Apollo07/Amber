@@ -1,7 +1,7 @@
 "use client"
 
 import Link from "next/link"
-import { LogOut, ShieldCheck, User as UserIcon, Users } from "lucide-react"
+import { LogIn, LogOut, ShieldCheck, User as UserIcon, Users } from "lucide-react"
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
@@ -18,11 +18,10 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { demoAction, useDemo } from "@/lib/demo"
 import { initials } from "@/lib/format"
-import { currentUser } from "@/lib/mock-data"
 import type { Role } from "@/lib/types"
 
 export function UserMenu() {
-  const { role, setRole } = useDemo()
+  const { user, role, setRole } = useDemo()
 
   return (
     <DropdownMenu>
@@ -30,17 +29,17 @@ export function UserMenu() {
         <Button variant="ghost" className="h-9 gap-2 rounded-full pr-3 pl-1" aria-label="Account menu">
           <Avatar className="size-7">
             <AvatarFallback className="bg-primary/15 text-xs font-semibold text-primary">
-              {initials(currentUser.name)}
+              {user ? initials(user.name) : <UserIcon className="size-4" />}
             </AvatarFallback>
           </Avatar>
-          <span className="hidden text-sm sm:inline">{currentUser.name.split(" ")[0]}</span>
+          <span className="hidden text-sm sm:inline">{user ? user.name.split(" ")[0] : "Account"}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64">
         <DropdownMenuLabel className="font-normal">
           <div className="flex flex-col gap-0.5">
-            <span className="text-sm font-medium">{currentUser.name}</span>
-            <span className="text-xs text-muted-foreground">{currentUser.email}</span>
+            <span className="text-sm font-medium">{user?.name ?? "Not signed in"}</span>
+            {user && <span className="text-xs text-muted-foreground">{user.email}</span>}
             <Badge variant="outline" className="mt-1.5 w-fit capitalize">
               {role === "admin" ? <ShieldCheck /> : <UserIcon />}
               {role}
@@ -63,9 +62,15 @@ export function UserMenu() {
         </DropdownMenuRadioGroup>
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild>
-          <Link href="/login" onClick={() => demoAction("Signed out")}>
-            <LogOut /> Sign out
-          </Link>
+          {user ? (
+            <Link href="/login" onClick={() => demoAction("Signed out")}>
+              <LogOut /> Sign out
+            </Link>
+          ) : (
+            <Link href="/login">
+              <LogIn /> Sign in
+            </Link>
+          )}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

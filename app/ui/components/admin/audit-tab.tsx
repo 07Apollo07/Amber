@@ -8,7 +8,10 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { demoAction } from "@/lib/demo"
-import { auditEvents } from "@/lib/mock-data"
+import type { AuditEvent } from "@/lib/types"
+
+// Loaded from the audit log API once it exists.
+const auditEvents: AuditEvent[] = []
 
 const actors = Array.from(new Set(auditEvents.map((e) => e.actor)))
 const actions = Array.from(new Set(auditEvents.map((e) => e.action)))
@@ -58,7 +61,7 @@ export function AuditTab() {
           <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input value={text} onChange={(e) => setText(e.target.value)} placeholder="Document or detail" className="pl-8" aria-label="Filter by document" />
         </div>
-        <Button variant="outline" className="ml-auto" onClick={() => demoAction("Export CSV")}>
+        <Button variant="outline" className="ml-auto" disabled={auditEvents.length === 0} onClick={() => demoAction("Export CSV")}>
           <Download /> Export CSV
         </Button>
       </div>
@@ -88,7 +91,7 @@ export function AuditTab() {
             {rows.length === 0 && (
               <TableRow>
                 <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
-                  No events match these filters.
+                  {auditEvents.length === 0 ? "No events recorded yet." : "No events match these filters."}
                 </TableCell>
               </TableRow>
             )}

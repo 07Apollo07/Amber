@@ -6,7 +6,6 @@ import { Plus } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { allTags, collections } from "@/lib/mock-data"
 import { cn } from "@/lib/utils"
 
 export function OrganizeFields({
@@ -20,9 +19,10 @@ export function OrganizeFields({
   tags: string[]
   onTagsChange: (value: string[]) => void
 }) {
-  const [extraTags, setExtraTags] = useState<string[]>([])
+  // Existing collections and tags load from the API later; tags added here are kept for this session.
+  const collections: string[] = []
+  const [tagOptions, setTagOptions] = useState<string[]>(() => [...tags])
   const [draft, setDraft] = useState("")
-  const tagOptions = [...allTags, ...extraTags]
 
   function toggle(tag: string) {
     onTagsChange(tags.includes(tag) ? tags.filter((t) => t !== tag) : [...tags, tag])
@@ -31,7 +31,7 @@ export function OrganizeFields({
   function addTag() {
     const tag = draft.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 32)
     if (!tag) return
-    if (!tagOptions.includes(tag)) setExtraTags((t) => [...t, tag])
+    if (!tagOptions.includes(tag)) setTagOptions((t) => [...t, tag])
     if (!tags.includes(tag)) onTagsChange([...tags, tag])
     setDraft("")
   }
@@ -57,6 +57,7 @@ export function OrganizeFields({
       <div className="space-y-1.5">
         <Label htmlFor="new-tag">Tags</Label>
         <div className="flex flex-wrap gap-1.5">
+          {tagOptions.length === 0 && <p className="text-xs text-muted-foreground">No tags yet. Add one below.</p>}
           {tagOptions.map((tag) => {
             const on = tags.includes(tag)
             return (

@@ -8,7 +8,6 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { fileTypeLabel } from "@/lib/format"
-import { allTags, collections } from "@/lib/mock-data"
 import type { FileType } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -25,10 +24,8 @@ const sourceOptions = [
   { value: "desktop_upload", label: "Uploaded files" },
   { value: "drive_picker", label: "Google Drive" },
 ]
-const collectionOptions = [
-  ...collections.map((c) => ({ value: c, label: c })),
-  ...allTags.map((t) => ({ value: `#${t}`, label: `#${t}` })),
-]
+// Populated from the user's collections and tags once the API exists.
+const collectionOptions: { value: string; label: string }[] = []
 const fileTypeOptions = (Object.keys(fileTypeLabel) as FileType[]).map((t) => ({ value: t, label: fileTypeLabel[t] }))
 
 function MultiFilter({
@@ -61,6 +58,7 @@ function MultiFilter({
       </PopoverTrigger>
       <PopoverContent align="start" className="w-60 p-1.5">
         <div className="max-h-72 overflow-y-auto">
+          {options.length === 0 && <p className="px-2 py-3 text-center text-sm text-muted-foreground">Nothing here yet</p>}
           {options.map((option) => {
             const checked = selected.includes(option.value)
             const id = `filter-${label}-${option.value}`

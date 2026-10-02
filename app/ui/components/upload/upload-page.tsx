@@ -6,8 +6,7 @@ import { Cloud, HardDrive, Info } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { demoAction, useDemo } from "@/lib/demo"
-import { currentUser, uploadQueue, type UploadRow } from "@/lib/mock-data"
-import type { Sharing } from "@/lib/types"
+import type { Sharing, UploadRow } from "@/lib/types"
 
 import { DrivePickerPanel } from "./drive-picker-panel"
 import { Dropzone } from "./dropzone"
@@ -16,8 +15,8 @@ import { OrganizeFields } from "./organize-fields"
 import { SharingSelector } from "./sharing-selector"
 
 export function UploadPage() {
-  const { driveConnected } = useDemo()
-  const [rows, setRows] = useState<UploadRow[]>(uploadQueue)
+  const { user, driveConnected } = useDemo()
+  const [rows, setRows] = useState<UploadRow[]>([])
   const [sharing, setSharing] = useState<Sharing>({ kind: "private" })
   const [collection, setCollection] = useState("none")
   const [tags, setTags] = useState<string[]>([])
@@ -62,7 +61,7 @@ export function UploadPage() {
             <Dropzone onFiles={(files) => enqueue(files.map((f) => ({ name: f.name, sizeBytes: f.size })))} />
           </TabsContent>
           <TabsContent value="drive">
-            <DrivePickerPanel onIndex={(names) => enqueue(names.map((name) => ({ name, sizeBytes: 0 })))} />
+            <DrivePickerPanel />
           </TabsContent>
         </Tabs>
       </div>
@@ -71,7 +70,7 @@ export function UploadPage() {
         <section className="rounded-2xl border bg-card/60 p-5">
           <h2 className="font-medium">Who can access</h2>
           <p className="mb-4 text-xs text-muted-foreground">Applies to the next files you add.</p>
-          <SharingSelector value={sharing} onChange={setSharing} domain={currentUser.domain} />
+          <SharingSelector value={sharing} onChange={setSharing} domain={user?.domain ?? null} />
         </section>
         <section className="rounded-2xl border bg-card/60 p-5">
           <h2 className="mb-4 font-medium">Organize</h2>

@@ -4,12 +4,16 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { demoAction } from "@/lib/demo"
+import { demoAction, useDemo } from "@/lib/demo"
 import { initials } from "@/lib/format"
-import { currentUser, users } from "@/lib/mock-data"
+import type { User } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
+// Loaded from the admin API once it exists.
+const users: User[] = []
+
 export function UsersTab() {
+  const { user: me } = useDemo()
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
@@ -29,7 +33,7 @@ export function UsersTab() {
           </TableHeader>
           <TableBody>
             {users.map((user) => {
-              const isSelf = user.id === currentUser.id
+              const isSelf = user.id === me?.id
               const active = user.status === "active"
               return (
                 <TableRow key={user.id} className={cn(!active && "opacity-60")}>
@@ -85,6 +89,13 @@ export function UsersTab() {
                 </TableRow>
               )
             })}
+            {users.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
+                  No users have signed in yet.
+                </TableCell>
+              </TableRow>
+            )}
           </TableBody>
         </Table>
       </div>

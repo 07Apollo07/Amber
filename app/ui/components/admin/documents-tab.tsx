@@ -18,8 +18,10 @@ import {
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { demoAction } from "@/lib/demo"
-import { documents } from "@/lib/mock-data"
 import type { AmberDocument } from "@/lib/types"
+
+// Loaded from the admin API once it exists.
+const documents: AmberDocument[] = []
 
 function accessList(doc: AmberDocument) {
   const owner = { type: "user", value: doc.owner, note: "Owner" }
@@ -96,7 +98,7 @@ export function DocumentsTab() {
             {rows.length === 0 && (
               <TableRow>
                 <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
-                  No documents match “{query}”.
+                  {query ? `No documents match “${query}”.` : "No documents have been added yet."}
                 </TableCell>
               </TableRow>
             )}

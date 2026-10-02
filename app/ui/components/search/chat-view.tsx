@@ -1,23 +1,25 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { ArrowUp, MessageSquare, PanelLeft, Plus, Trash2 } from "lucide-react"
+import { ArrowUp, MessageSquare, MessagesSquare, PanelLeft, Plus, Trash2 } from "lucide-react"
 
 import { AmberMark } from "@/components/app/amber-logo"
+import { EmptyState } from "@/components/app/empty-state"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import { demoAction } from "@/lib/demo"
-import { chatMessages, conversations, sampleAnswer } from "@/lib/mock-data"
-import type { Answer, ChatMessage } from "@/lib/types"
+import type { Answer, ChatMessage, Conversation } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 import { AnswerBlock } from "./answer-block"
 
 function ConversationList({
+  conversations,
   activeId,
   onSelect,
   onNew,
 }: {
+  conversations: Conversation[]
   activeId: string | null
   onSelect: (id: string) => void
   onNew: () => void
@@ -27,6 +29,7 @@ function ConversationList({
       <Button variant="outline" className="justify-start" onClick={onNew}>
         <Plus /> New chat
       </Button>
+      {conversations.length === 0 && <EmptyState icon={MessagesSquare} title="No conversations yet" className="py-8" />}
       <nav aria-label="Conversations" className="-mx-1 flex-1 overflow-y-auto px-1">
         <ul className="space-y-0.5">
           {conversations.map((c) => (
@@ -61,31 +64,24 @@ function ConversationList({
 }
 
 export function ChatView({ onCite }: { onCite: (answer: Answer, n: number) => void }) {
-  const [activeId, setActiveId] = useState<string | null>("c_1")
-  const [messages, setMessages] = useState<ChatMessage[]>(chatMessages)
+  // Conversations load from the chat API in Phase 5.
+  const [conversations] = useState<Conversation[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [draft, setDraft] = useState("")
-  const [thinking, setThinking] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const endRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" })
-  }, [messages, thinking])
+  }, [messages])
 
   function send() {
     const text = draft.trim()
-    if (!text || thinking) return
+    if (!text) return
     setMessages((m) => [...m, { id: crypto.randomUUID(), role: "user", text }])
     setDraft("")
-    setThinking(true)
-    // Phase 1: canned reply instead of the streaming API.
-    setTimeout(() => {
-      setMessages((m) => [
-        ...m,
-        { id: crypto.randomUUID(), role: "assistant", answer: { ...sampleAnswer, trace: { ...sampleAnswer.trace, query: text } } },
-      ])
-      setThinking(false)
-    }, 1000)
+    demoAction("Message not sent", "Chat isn't connected to the backend yet.")
   }
 
   function newChat() {
@@ -96,14 +92,14 @@ export function ChatView({ onCite }: { onCite: (answer: Answer, n: number) => vo
 
   function select(id: string) {
     setActiveId(id)
-    setMessages(chatMessages)
+    setMessages([])
     setDrawerOpen(false)
   }
 
   return (
     <div className="flex h-[calc(100dvh-14rem)] min-h-[520px] gap-4">
       <aside className="hidden w-64 shrink-0 lg:block">
-        <ConversationList activeId={activeId} onSelect={select} onNew={newChat} />
+        <ConversationList conversations={conversations} activeId={activeId} onSelect={select} onNew={newChat} />
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border bg-card/40">
@@ -118,13 +114,13 @@ export function ChatView({ onCite }: { onCite: (answer: Answer, n: number) => vo
               <SheetHeader className="p-0">
                 <SheetTitle>Conversations</SheetTitle>
               </SheetHeader>
-              <ConversationList activeId={activeId} onSelect={select} onNew={newChat} />
+              <ConversationList conversations={conversations} activeId={activeId} onSelect={select} onNew={newChat} />
             </SheetContent>
           </Sheet>
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
-          {messages.length === 0 && !thinking ? (
+          {messages.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center text-center text-muted-foreground">
               <MessageSquare className="mb-3 size-8 text-primary/70" />
               <p className="font-medium text-foreground">Start a conversation</p>
@@ -147,12 +143,6 @@ export function ChatView({ onCite }: { onCite: (answer: Answer, n: number) => vo
                     </div>
                   </div>
                 ),
-              )}
-              {thinking && (
-                <div className="flex items-center gap-3 text-sm text-muted-foreground" aria-live="polite">
-                  <AmberMark className="size-6 animate-pulse" />
-                  Searching your documents…
-                </div>
               )}
               <div ref={endRef} />
             </div>
@@ -182,7 +172,7 @@ export function ChatView({ onCite }: { onCite: (answer: Answer, n: number) => vo
               aria-label="Message"
               className="max-h-40 min-h-9 flex-1 resize-none bg-transparent px-2 py-1.5 text-[15px] outline-none placeholder:text-muted-foreground"
             />
-            <Button type="submit" size="icon" aria-label="Send" disabled={!draft.trim() || thinking}>
+            <Button type="submit" size="icon" aria-label="Send" disabled={!draft.trim()}>
               <ArrowUp />
             </Button>
           </div>

@@ -1,6 +1,6 @@
 # Amber UI
 
-Next.js 16 front end for Amber (Phase 1: UI only). Every page runs on static mock data in `lib/mock-data.ts`. Buttons that would call the API show a "demo only" toast instead (`demoAction` in `lib/demo.tsx`).
+Next.js 16 front end for Amber (Phase 1: UI only). There is no data yet: every list, table and chart shows its empty state until the API is connected, and no one is signed in. Buttons that would call the API show a "demo only" toast instead (`demoAction` in `lib/demo.tsx`).
 
 ```bash
 pnpm install

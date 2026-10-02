@@ -6,9 +6,10 @@ import { EyeOff, ThumbsDown, ThumbsUp } from "lucide-react"
 import { TracePanel } from "@/components/search/trace-panel"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { traces } from "@/lib/mock-data"
+import type { QueryTraceRow as TraceRow } from "@/lib/types"
 
-type TraceRow = (typeof traces)[number]
+// Loaded from the traces API once it exists.
+const traces: TraceRow[] = []
 
 function Feedback({ value }: { value: TraceRow["feedback"] }) {
   if (value === "up")
@@ -68,6 +69,13 @@ export function TracesTab() {
                 </TableCell>
               </TableRow>
             ))}
+            {traces.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={6} className="py-10 text-center text-muted-foreground">
+                  No questions have been asked yet.
+                </TableCell>
+              </TableRow>
+            )}
           </TableBody>
         </Table>
       </div>

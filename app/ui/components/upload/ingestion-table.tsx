@@ -1,17 +1,25 @@
 "use client"
 
-import { ExternalLink, RotateCw, X } from "lucide-react"
+import { ExternalLink, Inbox, RotateCw, X } from "lucide-react"
 
+import { EmptyState } from "@/components/app/empty-state"
 import { StatusBadge } from "@/components/app/status-badge"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { demoAction } from "@/lib/demo"
 import { formatBytes } from "@/lib/format"
-import type { UploadRow } from "@/lib/mock-data"
+import type { UploadRow } from "@/lib/types"
 
 export function IngestionTable({ rows, onRemove }: { rows: UploadRow[]; onRemove: (id: string) => void }) {
   if (rows.length === 0) {
-    return <p className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">No uploads yet.</p>
+    return (
+      <EmptyState
+        icon={Inbox}
+        title="No uploads yet"
+        description="Files you add will show their progress here."
+        className="rounded-2xl border border-dashed"
+      />
+    )
   }
 
   return (
