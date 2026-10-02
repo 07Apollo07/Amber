@@ -1,9 +1,5 @@
-"use client"
-
-import { useRouter } from "next/navigation"
-
 import { Button } from "@/components/ui/button"
-import { demoAction } from "@/lib/demo"
+import { googleSignInUrl } from "@/lib/auth-paths"
 
 function GoogleG() {
   return (
@@ -16,20 +12,19 @@ function GoogleG() {
   )
 }
 
-export function GoogleSignInButton() {
-  const router = useRouter()
+/** A plain link: the API sets the OAuth state cookie and redirects to Google's consent screen. */
+export function GoogleSignInButton({ returnTo }: { returnTo: string }) {
   return (
     <Button
+      asChild
       size="lg"
       variant="outline"
       className="h-11 w-full gap-3 bg-white text-[15px] font-medium text-neutral-900 hover:bg-neutral-100 hover:text-neutral-900 dark:bg-white dark:hover:bg-neutral-100"
-      onClick={() => {
-        demoAction("Continue with Google", "Demo sign-in: Google consent is wired up in Phase 2.")
-        router.push("/search")
-      }}
     >
-      <GoogleG />
-      Continue with Google
+      <a href={googleSignInUrl(returnTo)}>
+        <GoogleG />
+        Continue with Google
+      </a>
     </Button>
   )
 }

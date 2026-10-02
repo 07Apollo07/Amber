@@ -5,7 +5,8 @@ import { CloudUpload, FolderSync, HardDriveUpload } from "lucide-react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
-import { demoAction, useDemo } from "@/lib/demo"
+import { googleSignInUrl } from "@/lib/auth-paths"
+import { useSession } from "@/lib/session-context"
 import { cn } from "@/lib/utils"
 
 export const ACCEPTED_EXTENSIONS = [".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".md"]
@@ -16,7 +17,7 @@ export const MAX_BYTES = 50 * 1024 * 1024
  * bytes and enforces the size cap (Phase 4).
  */
 export function Dropzone({ onFiles }: { onFiles: (files: File[]) => void }) {
-  const { driveConnected, setDriveConnected } = useDemo()
+  const driveConnected = useSession().drive.connected
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
 
@@ -44,14 +45,8 @@ export function Dropzone({ onFiles }: { onFiles: (files: File[]) => void }) {
         <p className="mt-1 max-w-sm text-sm text-muted-foreground">
           Uploads are saved to your Drive, so reconnect it to upload files.
         </p>
-        <Button
-          className="mt-4"
-          onClick={() => {
-            setDriveConnected(true)
-            demoAction("Reconnect Google Drive", "Demo: marked Drive as connected.")
-          }}
-        >
-          Reconnect Google Drive
+        <Button asChild className="mt-4">
+          <a href={googleSignInUrl("/upload", { reconnect: true })}>Reconnect Google Drive</a>
         </Button>
       </div>
     )

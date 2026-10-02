@@ -4,7 +4,8 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { demoAction, useDemo } from "@/lib/demo"
+import { demoAction } from "@/lib/demo"
+import { useSession } from "@/lib/session-context"
 import { initials } from "@/lib/format"
 import type { User } from "@/lib/types"
 import { cn } from "@/lib/utils"
@@ -13,7 +14,7 @@ import { cn } from "@/lib/utils"
 const users: User[] = []
 
 export function UsersTab() {
-  const { user: me } = useDemo()
+  const me = useSession()
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
@@ -33,7 +34,7 @@ export function UsersTab() {
           </TableHeader>
           <TableBody>
             {users.map((user) => {
-              const isSelf = user.id === me?.id
+              const isSelf = user.id === me.id
               const active = user.status === "active"
               return (
                 <TableRow key={user.id} className={cn(!active && "opacity-60")}>

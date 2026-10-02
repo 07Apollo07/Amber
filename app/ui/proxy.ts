@@ -1,12 +1,24 @@
 import { NextResponse, type NextRequest } from "next/server"
 
+import { SESSION_COOKIES } from "@/lib/auth-paths"
+
+const PROTECTED = ["/search", "/upload", "/profile", "/admin"]
+
 /**
- * Sets a per-request nonce-based Content-Security-Policy. Next.js reads the nonce
- * from the request header and applies it to its own scripts.
- *
- * Phase 2 adds the session-cookie route guard here (redirect to /login when absent).
+ * 1. Optimistic route guard: signed-in pages need a session cookie, otherwise go to /login.
+ *    The real check (cookie signature, revocation, role) happens in the API via requireUser().
+ * 2. Per-request nonce-based Content-Security-Policy. Next.js reads the nonce from the
+ *    request header and applies it to its own scripts.
  */
 export function proxy(request: NextRequest) {
+  const { pathname, search } = request.nextUrl
+  const needsSession = pathname === "/" || PROTECTED.some((p) => pathname === p || pathname.startsWith(`${p}/`))
+  if (needsSession && !SESSION_COOKIES.some((name) => request.cookies.has(name))) {
+    const login = new URL("/login", request.url)
+    if (pathname !== "/") login.searchParams.set("return_to", pathname + search)
+    return NextResponse.redirect(login)
+  }
+
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64")
   const isDev = process.env.NODE_ENV === "development"
 

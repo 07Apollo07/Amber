@@ -5,7 +5,8 @@ import { Cloud, HardDrive, Info } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { demoAction, useDemo } from "@/lib/demo"
+import { demoAction } from "@/lib/demo"
+import { useSession } from "@/lib/session-context"
 import type { Sharing, UploadRow } from "@/lib/types"
 
 import { DrivePickerPanel } from "./drive-picker-panel"
@@ -15,23 +16,19 @@ import { OrganizeFields } from "./organize-fields"
 import { SharingSelector } from "./sharing-selector"
 
 export function UploadPage() {
-  const { user, driveConnected } = useDemo()
+  const user = useSession()
+  const driveConnected = user.drive.connected
+  // Filled from the upload API in Phase 4.
   const [rows, setRows] = useState<UploadRow[]>([])
   const [sharing, setSharing] = useState<Sharing>({ kind: "private" })
   const [collection, setCollection] = useState("none")
   const [tags, setTags] = useState<string[]>([])
 
-  function enqueue(items: { name: string; sizeBytes: number }[]) {
-    const added: UploadRow[] = items.map((item) => ({
-      id: crypto.randomUUID(),
-      name: item.name,
-      sizeBytes: item.sizeBytes,
-      status: "queued",
-      progress: 0,
-      driveUrl: null,
-    }))
-    setRows((r) => [...added, ...r])
-    demoAction(`${added.length} ${added.length === 1 ? "file" : "files"} queued`, "Demo only. Nothing was uploaded.")
+  function notAvailableYet(count: number) {
+    demoAction(
+      "Uploading isn't available yet",
+      `${count} ${count === 1 ? "file was" : "files were"} not uploaded. Uploads arrive in a later phase.`,
+    )
   }
 
   return (
@@ -58,7 +55,7 @@ export function UploadPage() {
                 </span>
               </div>
             )}
-            <Dropzone onFiles={(files) => enqueue(files.map((f) => ({ name: f.name, sizeBytes: f.size })))} />
+            <Dropzone onFiles={(files) => notAvailableYet(files.length)} />
           </TabsContent>
           <TabsContent value="drive">
             <DrivePickerPanel />
@@ -70,7 +67,7 @@ export function UploadPage() {
         <section className="rounded-2xl border bg-card/60 p-5">
           <h2 className="font-medium">Who can access</h2>
           <p className="mb-4 text-xs text-muted-foreground">Applies to the next files you add.</p>
-          <SharingSelector value={sharing} onChange={setSharing} domain={user?.domain ?? null} />
+          <SharingSelector value={sharing} onChange={setSharing} domain={user.domain} />
         </section>
         <section className="rounded-2xl border bg-card/60 p-5">
           <h2 className="mb-4 font-medium">Organize</h2>

@@ -4,7 +4,6 @@ import { connection } from "next/server"
 
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { DemoProvider } from "@/lib/demo"
 import "./globals.css"
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] })
@@ -22,10 +21,8 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
       <body className="amber-backdrop flex min-h-full flex-col">
-        <DemoProvider>
-          <TooltipProvider>{children}</TooltipProvider>
-        </DemoProvider>
-        <Toaster theme="dark" position="bottom-right" />
+        <TooltipProvider>{children}</TooltipProvider>
+        <Toaster position="bottom-right" />
       </body>
     </html>
   )

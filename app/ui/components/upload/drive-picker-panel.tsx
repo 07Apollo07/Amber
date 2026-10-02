@@ -3,10 +3,12 @@
 import { FolderOpen } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { demoAction, useDemo } from "@/lib/demo"
+import { googleSignInUrl } from "@/lib/auth-paths"
+import { demoAction } from "@/lib/demo"
+import { useSession } from "@/lib/session-context"
 
 export function DrivePickerPanel() {
-  const { driveConnected } = useDemo()
+  const driveConnected = useSession().drive.connected
 
   return (
     <div className="rounded-2xl border bg-card/40 p-6">
@@ -25,7 +27,11 @@ export function DrivePickerPanel() {
         >
           Open Google Drive Picker
         </Button>
-        {!driveConnected && <p className="mt-2 text-xs text-destructive">Reconnect Google Drive from your profile first.</p>}
+        {!driveConnected && (
+          <a href={googleSignInUrl("/upload", { reconnect: true })} className="mt-2 text-xs text-primary underline-offset-4 hover:underline">
+            Reconnect Google Drive first
+          </a>
+        )}
       </div>
     </div>
   )

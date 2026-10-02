@@ -6,7 +6,7 @@ Amber is an enterprise RAG web app. Users sign in with Google, index their uploa
 ### Decisions (from Q&A)
 | Area | Decision |
 |---|---|
-| Layout | Top nav bar (`AMBER · Search · Upload · Admin(admin only) · avatar menu → Profile/Sign out`). Light/dark theme, amber accent |
+| Layout | Top nav bar (`AMBER · Search · Upload · Admin(admin only) · avatar menu → Profile/Sign out`). Dark theme only, amber accent |
 | Search | Two modes: **Quick** (one answer plus ranked sources) and **Chat** (multi-turn, streamed, history saved) |
 | Search controls | Source filter (Upload/Drive/collection), file-type and date filters, source preview side panel, thumbs up/down feedback, traceability |
 | Traceability | "How this answer was built" panel (query rewrite, retrieved chunks with vector/keyword/rerank scores, which ones were cited), an access audit note ("N results hidden: no access"), and a full admin trace log |
@@ -32,11 +32,11 @@ Firebase and Postgres already exist, so Amber **connects to them, configures the
 - Check the version (≥ 14) and that **pgvector ≥ 0.5** is available (HNSW). On Cloud SQL it's built in, so `CREATE EXTENSION vector;` is enough.
 - Create a dedicated database `amber` (plus `amber_dev`/`amber_staging`, or a separate instance) so Amber is isolated from anything else on the instance. **Never point dev or tests at the prod DB.**
 - Roles (least privilege):
-  - `amber_migrator` owns the schema and runs Alembic only, from CI/deploy.
+  - `amber_migrator` owns the schema. Tables are created **manually** by the project owner (reference: `app/api/schema.sql`); the app never creates or alters them.
   - `amber_app` (API): DML on app tables, and INSERT-only on `audit_log`. RLS is enforced and it does not bypass RLS.
   - `amber_worker` (ingestion): write access to `documents`/`chunks`/`document_access` only.
 - Connectivity:
-  - Use **private IP** with the Cloud Run Direct VPC egress or a serverless VPC connector, TLS required, and **IAM database authentication** through the Cloud SQL Python Connector (`cloud-sql-python-connector[asyncpg]`), so there are no static DB passwords.
+  - The API connects with **psycopg2** to the **Cloud SQL Auth Proxy** sidecar on `127.0.0.1`. The proxy uses **private IP** (Cloud Run Direct VPC egress or a serverless VPC connector), TLS, and **IAM database authentication** (`--auto-iam-authn`), so there are no static DB passwords. The Cloud SQL Python connector doesn't support psycopg2.
   - If IAM auth isn't available on this instance, store passwords in Secret Manager and rotate them.
   - For local dev, use the Cloud SQL Auth Proxy to reach `amber_dev`.
 - Backups/PITR: confirm they're already enabled on the existing instance (Amber doesn't manage that).
@@ -45,20 +45,20 @@ Firebase and Postgres already exist, so Amber **connects to them, configures the
 
 ## Repo layout (monorepo)
 ```
-app/ui/        Next.js 15 (App Router, TS, Tailwind, shadcn/ui, TanStack Query, zod)
-app/api/        FastAPI (Python 3.12, uv, SQLAlchemy 2 async, Alembic, pydantic v2)
+app/ui/        Next.js 16 (App Router, TS, Tailwind, shadcn/ui, TanStack Query, zod)
+app/api/        FastAPI (Python 3.12, uv, psycopg2 with hand-written parameterized SQL, pydantic v2); schema.sql
   amber/api/       routers: auth, me, documents, collections, search, chat, drive, admin
-  amber/util/      config, security (session, RBAC, CSRF), db, audit
+  amber/util/      config, security (session, RBAC, CSRF), db (psycopg2 pool), audit
+  amber/repository.py  all SQL (parameterized)
   amber/rag/       LangChain pipeline: splitter, AclHybridRetriever, reranker, LCEL chains, trace callback
     providers/       llm.py: LangChain model factories (ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings) chosen by settings
   amber/ingest/    parsers, drive sync, worker entrypoint
-packages/api-contract/  OpenAPI spec → generated TS client + types (single source of truth)
 infra/scripts/          idempotent gcloud scripts: APIs, SAs/IAM, secrets/KMS, GCS, Tasks/Scheduler, LB + Cloud Armor, deploy (never create or delete the existing Firebase/Postgres)
 docker-compose.yml      api, worker, web, fake-gcs, Cloud SQL Auth Proxy → cloud amber_dev; auth uses the dev Firebase project
 ```
 
 ## Phase 1: UI (built first, against mocks)
-Set up `app/ui` with shadcn/ui and generate types from `packages/api-contract/openapi.yaml`, which is written up front. Use **MSW** mock handlers so every page works with no backend. Server-side `middleware.ts` handles route guards (redirect when there is no session cookie). Admin routes are hidden in the UI and also enforced server-side.
+✅ built. `app/ui` uses Next.js 16 with shadcn/ui, dark theme only. There is no mock API layer: pages show empty states until their API exists, and unbuilt actions show a "demo only" toast. `proxy.ts` (Next.js 16's name for middleware) handles route guards, redirecting to /login when there is no session cookie. Admin routes are hidden in the UI and also enforced server-side. UI types live in `lib/types.ts`.
 
 Pages (`app/ui/app/`):
 - **`/login`**: Amber branding and a "Continue with Google" button. A consent explainer lists the requested Drive scope and why it's needed: reading files you pick and **saving your uploads to your Drive**.
@@ -93,20 +93,21 @@ UI security from day one:
 - Use a strict CSP with nonces via middleware, plus HSTS, `X-Frame-Options: DENY`, `Referrer-Policy`, and `Permissions-Policy` in `next.config`.
 - Store no tokens in `localStorage`.
 
-## Phase 2: Auth (existing cloud Firebase + Google, one consent screen)
-- The web app initialises the Firebase JS SDK with the existing project's public config (`NEXT_PUBLIC_FIREBASE_*`). These are public identifiers, not secrets. Everything sensitive (OAuth client secret) stays server-side.
-- The frontend uses the Google Identity Services **code client** and requests `openid email profile` + `https://www.googleapis.com/auth/drive.file` with `access_type=offline` and PKCE. Sign-in and the Drive permission happen on one screen.
-- FastAPI handles `POST /auth/google/callback`:
-  1. Exchange the code server-side and verify the ID token (aud, iss, `email_verified`).
-  2. Encrypt the **refresh token** with Cloud KMS (envelope encryption) and store it in `oauth_tokens`.
-  3. Return the Google ID token, which the web app passes to Firebase `signInWithCredential`.
-- The web app sends the Firebase ID token to `POST /auth/session`. FastAPI verifies it with `firebase-admin` and calls `create_session_cookie`. The result is set as an `__Host-` style **httpOnly, Secure, SameSite=Strict** cookie with a 5-day maximum and revocation checks.
-- Web and API share one origin through the GCP HTTPS Load Balancer (`/api/*` → FastAPI). There is no CORS surface. CSRF is blocked by SameSite=Strict plus a required `X-Amber-CSRF` double-submit header on mutating requests.
-- The `current_user` dependency verifies the session cookie (`check_revoked=True`) and loads the user from the DB. Roles are **authoritative in Postgres**, not client claims. Deactivated users are rejected.
+## Phase 2: Auth (existing cloud Firebase + Google, one consent screen) ✅ built
+- **Server-side redirect flow** (changed from the original Google popup + Firebase JS SDK design: the popup can't do PKCE, and this way no token reaches browser JavaScript):
+  - "Continue with Google" is a plain link to `GET /api/auth/google/start`. The API redirects to Google with `openid email profile` + `https://www.googleapis.com/auth/drive.file`, `access_type=offline`, PKCE (S256), `state` and `nonce`. The state, nonce and verifier sit in an encrypted, 10-minute, single-use `SameSite=Lax` cookie. Sign-in and the Drive permission happen on one screen.
+  - `GET /api/auth/google/callback`:
+    1. Checks the state, exchanges the code server-side, and verifies the ID token (signature, aud, iss, exp, nonce, `email_verified`).
+    2. Encrypts the **refresh token** with envelope encryption (Cloud KMS key, AES-256-GCM, bound to the user id) and stores it in `oauth_tokens`. If Google omits the refresh token for a returning user with none on file, the flow repeats once with `prompt=consent`.
+    3. Signs in to Firebase **server-side** (`signInWithIdp`), calls `create_session_cookie`, and sets the session cookie: **HttpOnly, Secure, SameSite=Strict**, 5 days, `__Host-` prefix over https. It then lands on the app with a same-origin meta refresh, so the browser sends the Strict cookie straight away.
+- Web and API share one origin through the GCP HTTPS Load Balancer (`/api/*` → FastAPI); locally a Next.js rewrite does the same. There is no CORS surface. CSRF is blocked by SameSite=Strict, an Origin check, and a required `X-Amber-CSRF` double-submit header on mutating requests.
+- The `current_user` dependency verifies the session cookie's signature and expiry on every request. It then checks revocation: "sign out everywhere" uses Firebase's revoke-all, with that timestamp cached per instance for 60 s. A single-device sign-out is recorded in the `revoked_sessions` table as the cookie's SHA-256 hash, so a copied cookie stops working immediately. The dependency then loads the user from the DB. Roles are **authoritative in Postgres**, not client claims. Deactivated users are rejected. The web app gates pages server-side with `requireUser()` → `/api/me`.
+- Also built: sign out, sign out of all devices (`revoke_refresh_tokens`), Drive disconnect (revokes at Google, deletes the token), Drive reconnect (`prompt=consent`), and audit rows for each of these. `schema.sql` documents `users`, `oauth_tokens` and `audit_log` (created manually).
+- Also: per-IP rate limits on the auth endpoints (in-memory per instance; Cloud Armor adds a global limit in Phase 7). The audit IP comes from `X-Forwarded-For` only when the request arrives through a configured trusted proxy (`AMBER_TRUSTED_PROXIES`). A bootstrap admin email only grants admin when the account is first created. Drive disconnect reports whether Google confirmed the revocation.
 - Scope rationale: `drive.file` covers only files picked through the Picker **and files/folders Amber itself creates**, so desktop uploads into the user's Drive need no extra scope. It avoids Google's restricted-scope CASA audit and is least privilege. Broader whole-Drive indexing can come later under `drive.readonly`, after verification.
 
 ## Phase 3: Backend and data model (existing Postgres + pgvector)
-Alembic migrations run against the existing instance's `amber` database as `amber_migrator`. Migration `0001` runs `CREATE EXTENSION IF NOT EXISTS vector`, creates the roles' grants, and enables RLS. Migrations are applied by CI before deploy, never at app startup.
+No ORM and no migration framework. Tables are **created manually** in Postgres by the project owner; the app, CI and deploy scripts never create or alter them. **`app/api/schema.sql`** is the reference definition of what the code expects; Phase 3 adds the pgvector extension, new tables, grants and RLS policies to it. All queries are hand-written, parameterized psycopg2 SQL in `amber/repository.py`.
 
 Tables:
 
@@ -215,7 +216,7 @@ Gemini API access:
     - `04-storage.sh`: a private GCS **staging** bucket (uniform access, public-access prevention enforced, CMEK, lifecycle delete after 3 days). Drive is the lasting store for uploads.
     - `05-queues.sh`: the Cloud Tasks queue and Cloud Scheduler jobs (Drive re-sync). Both are OIDC-authenticated to the worker.
     - `06-edge.sh`: a global HTTPS LB with a managed cert, serverless NEGs (`/api/*` → api, `/*` → web), and a **Cloud Armor** policy (OWASP preconfigured rules + rate limiting). Cloud Run ingress is set to `internal-and-cloud-load-balancing`; the worker is internal only.
-    - `deploy.sh <env>`: builds images with Cloud Build into Artifact Registry, runs Alembic migrations as `amber_migrator` (a Cloud Run job), then `gcloud run deploy` for api/worker/web. Images are pinned by digest, secrets mounted with `--set-secrets`, each service runs as its own SA, and private VPC egress is used to reach the existing Postgres.
+    - `deploy.sh <env>`: builds images with Cloud Build into Artifact Registry, then `gcloud run deploy` for api/worker/web. Images are pinned by digest, secrets mounted with `--set-secrets`, each service runs as its own SA, and private VPC egress is used to reach the existing Postgres.
   - **Guardrail:** the scripts only *reference* the existing Firebase project and Postgres instance. They contain no `gcloud sql instances create/delete/patch` or Firebase project mutations, and CI greps for these and fails if any appear. If the instance still has a public IP, restrict authorized networks to none (a one-time manual step, documented) and rely on the connector/private IP.
   - **Terraform is optional later.** Because each script maps to one resource group, it can be converted to Terraform with `terraform import` without recreating anything.
 - **CI (GitHub Actions):** lint/typecheck, pytest, Playwright, plus `pip-audit`, `npm audit`, Semgrep, gitleaks, Trivy container scans, and Dependabot.
@@ -223,10 +224,10 @@ Gemini API access:
 - **Retention:** user "delete my history" hard-deletes the user's data. Account deletion revokes the Google token and purges the user's docs and chunks.
 
 ## Verification
-- **Phase 1:** `pnpm dev` in `app/ui` with MSW. Use Playwright to click through every page in both modes, check that admin routes redirect for members, and check that a markdown-XSS payload in a mock answer renders inert.
+- **Phase 1:** `pnpm dev` in `app/ui`. Use Playwright to click through every page in both modes, check that admin routes redirect for members, and check that a markdown-XSS payload in a mock answer renders inert.
 - **Infra smoke check (before step 3):** connect through the Cloud SQL connector as `amber_app` to `amber_dev`, run `SELECT extversion FROM pg_extension WHERE extname='vector'`, and confirm `amber_app` can't `UPDATE audit_log`. Sign in with Google against the dev Firebase project and verify the ID token in FastAPI.
 - **Local full stack:** `docker compose up` (api, worker, web, fake-gcs, Cloud SQL Auth Proxy → cloud `amber_dev`, dev Firebase project).
-- **pytest:** DB tests run against a throwaway pgvector Postgres (testcontainers, the same major version as the cloud instance) or a disposable schema in `amber_dev`, never prod. Firebase token verification is mocked in unit tests and hits the dev Firebase project in integration tests.
+- **pytest:** unit tests only. They never connect to a database or call external services, so they can't affect data whenever they run. Database-backed and timing-dependent tests were deliberately removed; verify DB behaviour manually against a dev database. Firebase token verification is mocked in unit tests and hits the dev Firebase project in integration tests.
   - Auth: no cookie, revoked cookie, deactivated user, member hitting `/admin`.
   - CSRF: missing header is rejected.
   - **ACL tests:** user A uploads a private doc and user B's search must not return it; hidden_count increments; IDOR on `/documents/{id}` returns 404; RLS blocks a direct query without the session vars.
@@ -244,10 +245,10 @@ Gemini API access:
 - **Security pass:** run `/security-review`, plus OWASP ZAP baseline against the staging URL.
 
 ## Build order
-1. Scaffold the monorepo and write the OpenAPI contract.
+1. Scaffold the monorepo.
 2. **UI with mocks (all pages)**.
 3. Configure the existing Firebase and Postgres (see the prerequisites above), then build the auth flow.
-4. Migrations on the existing Postgres, then core API.
+4. Core API (tables created manually on the existing Postgres).
 5. Drive client (token refresh, `Amber Uploads` folder, resumable upload, permissions) and the desktop upload → Drive → index pipeline.
 6. Search and chat with traces.
 7. Drive Picker and `changes` sync (shared with desktop uploads).

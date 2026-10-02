@@ -16,11 +16,12 @@ import {
 } from "@/components/ui/dialog"
 import { OrganizeFields } from "@/components/upload/organize-fields"
 import { SharingSelector } from "@/components/upload/sharing-selector"
-import { demoAction, useDemo } from "@/lib/demo"
+import { demoAction } from "@/lib/demo"
+import { useSession } from "@/lib/session-context"
 import type { AmberDocument } from "@/lib/types"
 
 export function EditDocumentDialog({ doc }: { doc: AmberDocument }) {
-  const { user } = useDemo()
+  const user = useSession()
   const [sharing, setSharing] = useState(doc.sharing)
   const [collection, setCollection] = useState(doc.collection ?? "none")
   const [tags, setTags] = useState(doc.tags)
@@ -38,7 +39,7 @@ export function EditDocumentDialog({ doc }: { doc: AmberDocument }) {
           <DialogDescription>Change who can access this document and how it&apos;s organized.</DialogDescription>
         </DialogHeader>
         <div className="space-y-6">
-          <SharingSelector value={sharing} onChange={setSharing} domain={user?.domain ?? null} />
+          <SharingSelector value={sharing} onChange={setSharing} domain={user.domain} />
           <OrganizeFields collection={collection} onCollectionChange={setCollection} tags={tags} onTagsChange={setTags} />
         </div>
         <DialogFooter>

@@ -6,7 +6,7 @@ import { Search, Shield, Upload } from "lucide-react"
 
 import { AmberLogo } from "@/components/app/amber-logo"
 import { UserMenu } from "@/components/app/user-menu"
-import { useDemo } from "@/lib/demo"
+import { useSession } from "@/lib/session-context"
 import { cn } from "@/lib/utils"
 
 const links = [
@@ -17,7 +17,7 @@ const links = [
 
 export function TopNav() {
   const pathname = usePathname()
-  const { role } = useDemo()
+  const { role } = useSession()
 
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/75 backdrop-blur-xl">

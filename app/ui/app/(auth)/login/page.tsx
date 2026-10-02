@@ -1,8 +1,11 @@
 import type { Metadata } from "next"
-import { FileSearch, FolderUp, Lock, ShieldCheck } from "lucide-react"
+import { redirect } from "next/navigation"
+import { CircleAlert, FileSearch, FolderUp, Lock, ShieldCheck } from "lucide-react"
 
 import { AmberMark } from "@/components/app/amber-logo"
 import { GoogleSignInButton } from "@/components/app/google-sign-in-button"
+import { safeReturnTo } from "@/lib/auth-paths"
+import { getSession } from "@/lib/session"
 
 export const metadata: Metadata = { title: "Sign in" }
 
@@ -24,7 +27,24 @@ const permissions = [
   },
 ]
 
-export default function LoginPage() {
+// Codes come from the API's /login?error=… redirects (amber/api/auth.py).
+const errors: Record<string, string> = {
+  state: "Your sign-in attempt expired. Please try again.",
+  denied: "Sign-in was cancelled on the Google screen.",
+  email_not_verified: "Your Google account's email address isn't verified.",
+  deactivated: "Your Amber account has been deactivated. Contact an admin.",
+  rate_limited: "Too many sign-in attempts. Please wait a minute and try again.",
+}
+const genericError = "Something went wrong signing you in. Please try again."
+
+export default async function LoginPage({ searchParams }: PageProps<"/login">) {
+  const params = await searchParams
+  const returnTo = safeReturnTo(typeof params.return_to === "string" ? params.return_to : null)
+  const errorCode = typeof params.error === "string" ? params.error : null
+
+  const session = await getSession()
+  if (session.user) redirect(returnTo)
+
   return (
     <main className="flex flex-1 items-center justify-center px-4 py-12">
       <div className="w-full max-w-md">
@@ -37,7 +57,14 @@ export default function LoginPage() {
         </div>
 
         <div className="rounded-2xl border bg-card/80 p-6 shadow-2xl shadow-black/30 backdrop-blur">
-          <GoogleSignInButton />
+          {errorCode && (
+            <div role="alert" className="mb-4 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm">
+              <CircleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
+              <span>{errors[errorCode] ?? genericError}</span>
+            </div>
+          )}
+
+          <GoogleSignInButton returnTo={returnTo} />
 
           <div className="mt-6">
             <p className="mb-3 flex items-center gap-1.5 text-xs font-medium tracking-wide text-muted-foreground uppercase">

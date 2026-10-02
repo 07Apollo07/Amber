@@ -1,26 +1,39 @@
 "use client"
 
 import Link from "next/link"
-import { CircleCheck, CircleX, ExternalLink, FileText, History, LogIn, LogOut, MessageSquare, Search, ShieldCheck, Trash2, User as UserIcon } from "lucide-react"
+import { useRouter } from "next/navigation"
+import { useState } from "react"
+import { CircleCheck, CircleX, ExternalLink, FileText, History, LogOut, MessageSquare, Search, ShieldCheck, Trash2 } from "lucide-react"
+import { toast } from "sonner"
 
 import { EmptyState } from "@/components/app/empty-state"
 import { FileIcon } from "@/components/app/file-icon"
 import { SharingSummary } from "@/components/app/sharing-summary"
+import { useSignOut } from "@/components/app/sign-out"
 import { StatusBadge } from "@/components/app/status-badge"
-import { Avatar, AvatarFallback } from "@/components/ui/avatar"
+import { UserAvatar } from "@/components/app/user-avatar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { demoAction, useDemo } from "@/lib/demo"
-import { initials } from "@/lib/format"
+import { apiPost } from "@/lib/api"
+import { googleSignInUrl } from "@/lib/auth-paths"
+import { demoAction } from "@/lib/demo"
+import { useSession } from "@/lib/session-context"
 import type { AmberDocument, Conversation, SearchHistoryItem } from "@/lib/types"
 
 import { DeleteDocumentDialog } from "./delete-document-dialog"
 import { EditDocumentDialog } from "./edit-document-dialog"
-
-/** Scopes Amber requests at sign-in (see PLAN.md, Phase 2). */
-const DRIVE_SCOPES = ["openid", "email", "profile", "drive.file"]
 
 // Loaded from the API once it exists.
 const myDocuments: AmberDocument[] = []
@@ -28,55 +41,104 @@ const conversations: Conversation[] = []
 const searchHistory: SearchHistoryItem[] = []
 
 function AccountCard() {
-  const { user, role } = useDemo()
+  const user = useSession()
+  const { signOut, pending } = useSignOut()
   return (
     <Card>
       <CardContent className="flex flex-col gap-5">
         <div className="flex items-center gap-4">
-          <Avatar className="size-14">
-            <AvatarFallback className="bg-primary/15 text-lg font-semibold text-primary">
-              {user ? initials(user.name) : <UserIcon className="size-6" />}
-            </AvatarFallback>
-          </Avatar>
+          <UserAvatar user={user} className="size-14 text-lg" />
           <div className="min-w-0">
-            <p className="truncate text-lg font-semibold">{user?.name ?? "Not signed in"}</p>
-            {user && <p className="truncate text-sm text-muted-foreground">{user.email}</p>}
+            <p className="truncate text-lg font-semibold">{user.name}</p>
+            <p className="truncate text-sm text-muted-foreground">{user.email}</p>
             <Badge variant="outline" className="mt-1.5 capitalize">
-              <ShieldCheck /> {role}
+              <ShieldCheck /> {user.role}
             </Badge>
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          {user ? (
-            <>
-              <Button variant="outline" onClick={() => demoAction("Signed out")}>
-                <LogOut /> Sign out
-              </Button>
-              <Button variant="ghost" className="text-muted-foreground" onClick={() => demoAction("Signed out of all sessions")}>
-                Sign out of all devices
-              </Button>
-            </>
-          ) : (
-            <Button asChild>
-              <Link href="/login">
-                <LogIn /> Sign in
-              </Link>
-            </Button>
-          )}
+          <Button variant="outline" disabled={pending} onClick={() => signOut()}>
+            <LogOut /> Sign out
+          </Button>
+          <Button variant="ghost" className="text-muted-foreground" disabled={pending} onClick={() => signOut(true)}>
+            Sign out of all devices
+          </Button>
         </div>
       </CardContent>
     </Card>
   )
 }
 
+/** Google scope URLs → the short names people recognise. */
+function scopeLabel(scope: string): string {
+  return scope.replace("https://www.googleapis.com/auth/", "").replace(/^userinfo\./, "")
+}
+
+function DisconnectDriveButton() {
+  const router = useRouter()
+  const [pending, setPending] = useState(false)
+  const [open, setOpen] = useState(false)
+
+  async function disconnect() {
+    setPending(true)
+    try {
+      const res = await apiPost("/api/auth/google/disconnect")
+      const { revoked_at_google } = (await res.json()) as { revoked_at_google: boolean }
+      setOpen(false)
+      if (revoked_at_google) {
+        toast.success("Google Drive disconnected")
+      } else {
+        // Amber deleted its copy but couldn't confirm Google removed the grant.
+        toast.warning("Removed from Amber", {
+          description: "To be sure, also remove Amber under Third-party access at myaccount.google.com/connections.",
+          duration: 15000,
+        })
+      }
+      router.refresh()
+    } catch (err) {
+      toast.error("Couldn't disconnect Google Drive", {
+        description: err instanceof Error ? err.message : "Please try again.",
+      })
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button variant="destructive">Disconnect</Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Disconnect Google Drive?</DialogTitle>
+          <DialogDescription>
+            Amber will lose access to your Drive. You won&apos;t be able to upload files or add Drive files until
+            you reconnect. Files already in your Drive stay there.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button variant="outline">Cancel</Button>
+          </DialogClose>
+          <Button variant="destructive" disabled={pending} onClick={disconnect}>
+            {pending ? "Disconnecting…" : "Disconnect"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function DriveCard() {
-  const { driveConnected, setDriveConnected } = useDemo()
+  const { drive } = useSession()
+  const reconnectUrl = googleSignInUrl("/profile", { reconnect: true })
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           Google Drive
-          {driveConnected ? (
+          {drive.connected ? (
             <span className="inline-flex items-center gap-1 rounded-md bg-success/15 px-1.5 py-0.5 text-xs font-medium text-success">
               <CircleCheck className="size-3.5" /> Connected
             </span>
@@ -89,44 +151,34 @@ function DriveCard() {
         <CardDescription>Amber reads files you pick and saves your uploads to an Amber Uploads folder in Drive.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {driveConnected && (
+        {drive.scopes.length > 0 && (
           <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-sm">
             <dt className="text-muted-foreground">Permissions</dt>
             <dd className="flex flex-wrap gap-1">
-              {DRIVE_SCOPES.map((s) => (
-                <code key={s} className="rounded bg-muted px-1.5 py-0.5 text-xs">
-                  {s}
+              {drive.scopes.map((s) => (
+                <code key={s} className="rounded bg-muted px-1.5 py-0.5 text-xs" title={s}>
+                  {scopeLabel(s)}
                 </code>
               ))}
             </dd>
-            <dt className="text-muted-foreground">Last sync</dt>
-            <dd className="text-muted-foreground">Not synced yet</dd>
           </dl>
         )}
+        {!drive.connected && (
+          <p className="text-sm text-muted-foreground">
+            Connect Drive to upload files and add documents from your Drive.
+          </p>
+        )}
         <div className="flex flex-wrap gap-2">
-          {driveConnected ? (
+          {drive.connected ? (
             <>
-              <Button variant="outline" onClick={() => demoAction("Reconnect Google Drive")}>
-                Reconnect
+              <Button variant="outline" asChild>
+                <a href={reconnectUrl}>Reconnect</a>
               </Button>
-              <Button
-                variant="destructive"
-                onClick={() => {
-                  setDriveConnected(false)
-                  demoAction("Drive disconnected", "Demo: uploads are now disabled until you reconnect.")
-                }}
-              >
-                Disconnect
-              </Button>
+              <DisconnectDriveButton />
             </>
           ) : (
-            <Button
-              onClick={() => {
-                setDriveConnected(true)
-                demoAction("Google Drive connected")
-              }}
-            >
-              Connect Google Drive
+            <Button asChild>
+              <a href={reconnectUrl}>Connect Google Drive</a>
             </Button>
           )}
         </div>
