@@ -34,6 +34,8 @@ const errors: Record<string, string> = {
   email_not_verified: "Your Google account's email address isn't verified.",
   deactivated: "Your Amber account has been deactivated. Contact an admin.",
   rate_limited: "Too many sign-in attempts. Please wait a minute and try again.",
+  firebase_signin: "Amber couldn't complete sign-in with Firebase. Please try again, or contact an admin if it keeps happening.",
+  firebase_session: "Amber couldn't start your session. Please try again, or contact an admin if it keeps happening.",
 }
 const genericError = "Something went wrong signing you in. Please try again."
 

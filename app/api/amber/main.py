@@ -14,7 +14,7 @@ from amber.util.ratelimit import RateLimited, rate_limited_response
 
 
 def create_app(settings: Settings | None = None, **overrides) -> FastAPI:
-    """Run with `uvicorn amber.main:create_app --factory`.
+    """Run with `python -m amber.main` (see run() below).
 
     `overrides` (database, google, firebase, cipher) let tests swap external services."""
     settings = settings or get_settings()
@@ -64,3 +64,23 @@ def create_app(settings: Settings | None = None, **overrides) -> FastAPI:
     app.include_router(auth.router)
     app.include_router(me.router)
     return app
+
+
+def run() -> None:
+    """Starts the API server. Auto-reloads on code changes in dev."""
+    import uvicorn
+
+    settings = get_settings()
+    uvicorn.run(
+        "amber.main:create_app",
+        factory=True,
+        host=settings.host,
+        port=settings.port,
+        reload=settings.env == "dev",
+        # The client IP is resolved by amber/util/net.py from AMBER_TRUSTED_PROXIES only.
+        proxy_headers=False,
+    )
+
+
+if __name__ == "__main__":
+    run()

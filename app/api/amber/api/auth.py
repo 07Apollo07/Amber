@@ -210,8 +210,9 @@ def google_callback(
 
     try:
         fb = firebase.sign_in_with_google(tokens.id_token)
-    except SessionInvalid:
-        return _fail(settings, "firebase")
+    except SessionInvalid as exc:
+        log.error("Firebase sign-in failed: %s", exc)
+        return _fail(settings, "firebase_signin")
 
     user = _upsert_user(db, settings, identity, fb.uid)
 
@@ -239,9 +240,11 @@ def google_callback(
 
     try:
         session_cookie = firebase.create_session_cookie(fb.id_token)
-    except Exception:
+    except Exception as exc:
+        # Usually missing or under-privileged Google credentials for Firebase Admin.
+        log.error("Creating the Firebase session cookie failed: %s: %s", type(exc).__name__, exc)
         db.rollback()
-        return _fail(settings, "firebase")
+        return _fail(settings, "firebase_session")
 
     repository.touch_last_login(db, user.id)
     has_refresh_token = tokens.refresh_token is not None or stored is not None

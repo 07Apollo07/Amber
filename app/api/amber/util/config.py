@@ -17,6 +17,11 @@ class Settings(BaseSettings):
 
     env: Literal["dev", "test", "prod"] = "dev"
 
+    # Where `python -m amber.main` listens. In a container use AMBER_HOST=0.0.0.0 and the
+    # platform's port (Cloud Run sets $PORT).
+    host: str = "127.0.0.1"
+    port: int = 8000
+
     # Origin the browser uses for both the web app and /api (same origin via the LB, or
     # the Next.js dev server's /api rewrite locally). OAuth redirects are built from it.
     public_base_url: str = "http://localhost:3000"

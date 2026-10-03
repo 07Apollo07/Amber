@@ -34,8 +34,12 @@ No Google or Firebase token ever reaches browser JavaScript. Every request verif
 ```bash
 cp .env.example .env              # fill in the values
 uv sync
-uv run uvicorn amber.main:create_app --factory --reload --port 8000
+gcloud auth application-default login                              # Google credentials for Firebase Admin
+gcloud auth application-default set-quota-project <firebase-project-id>
+uv run python -m amber.main          # http://127.0.0.1:8000, auto-reloads when AMBER_ENV=dev
 ```
+
+Firebase Admin (session cookies, revocation) needs Google credentials, so the API won't start without them. Your Google account needs the Firebase Authentication Admin role on the project. Alternatively, set `GOOGLE_APPLICATION_CREDENTIALS` to a dev service-account key that's kept out of the repo.
 
 Then run the web app (`app/ui`, `pnpm dev`) and open http://localhost:3000. The web app proxies `/api/*` here, so cookies stay first-party.
 

@@ -7,12 +7,28 @@ from datetime import timedelta
 from typing import Any
 
 import firebase_admin
+import google.auth
 import httpx
 from firebase_admin import auth as fb_auth
+from google.auth.exceptions import DefaultCredentialsError
 
 from amber.util.config import Settings
 
 SIGN_IN_WITH_IDP = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp"
+
+
+def _require_google_credentials() -> None:
+    """Firebase Admin calls (session cookies, revocation) need Google credentials. Fail at
+    startup with instructions rather than at the first sign-in."""
+    try:
+        google.auth.default()
+    except DefaultCredentialsError as exc:
+        raise RuntimeError(
+            "No Google credentials found for Firebase Admin. Locally run "
+            "`gcloud auth application-default login` (then `gcloud auth application-default "
+            "set-quota-project <firebase-project-id>`), or set GOOGLE_APPLICATION_CREDENTIALS. "
+            "In GCP the service account provides them."
+        ) from exc
 
 
 class SessionInvalid(Exception):
@@ -31,6 +47,7 @@ class FirebaseIdentity:
         self._http = http
         self._valid_after: dict[str, tuple[float, float]] = {}  # uid -> (revoked-before ts, cached until)
         self._lock = threading.Lock()
+        _require_google_credentials()
         try:
             self._app = firebase_admin.get_app("amber")
         except ValueError:
@@ -51,7 +68,12 @@ class FirebaseIdentity:
             timeout=10,
         )
         if resp.status_code != 200:
-            raise SessionInvalid(f"signInWithIdp returned {resp.status_code}")
+            # Google's message names the cause (e.g. INVALID_IDP_RESPONSE, API key restrictions); no token in it.
+            try:
+                message = resp.json().get("error", {}).get("message", "")
+            except ValueError:
+                message = ""
+            raise SessionInvalid(f"signInWithIdp returned {resp.status_code}: {message}")
         body = resp.json()
         return FirebaseSignIn(uid=body["localId"], id_token=body["idToken"])
 
