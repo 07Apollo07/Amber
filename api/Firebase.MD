@@ -1,6 +1,6 @@
 Here's how to set up Firebase and Google and fill in every setting the code reads.
 
-The API reads its settings from `AMBER_*` variables in `app/api/.env`; `app/api/.env.example` is the template. The web app needs one variable in `app/ui/.env.local`. You don't need any `NEXT_PUBLIC_FIREBASE_*` variables: the API does the whole Firebase exchange on the server, so the browser never loads the Firebase SDK.
+The API reads its settings from `AMBER_*` variables in `api/.env`; `api/.env.example` is the template. The web app needs one variable in `ui/.env.local`. You don't need any `NEXT_PUBLIC_FIREBASE_*` variables: the API does the whole Firebase exchange on the server, so the browser never loads the Firebase SDK.
 
 Google's console menu names change occasionally, so the labels below may differ slightly.
 
@@ -48,7 +48,7 @@ Google's console menu names change occasionally, so the labels below may differ 
 
 11. **State-cookie key** → `AMBER_STATE_COOKIE_KEY`:
     ```bash
-    cd app/api && uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    cd api && uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     ```
 12. **Token-encryption key.** This encrypts users' stored Drive tokens. Pick one option:
     - **Dev only:** generate a local key → `AMBER_LOCAL_TOKEN_KEY`:
@@ -59,7 +59,7 @@ Google's console menu names change occasionally, so the labels below may differ 
 
 ## Part 5 — The remaining settings
 
-13. **Finish `app/api/.env`:**
+13. **Finish `api/.env`:**
     ```
     AMBER_ENV=dev
     AMBER_PUBLIC_BASE_URL=http://localhost:3000
@@ -76,19 +76,19 @@ Google's console menu names change occasionally, so the labels below may differ 
     ```
     - **Bootstrap admin:** this only makes you admin the *first* time that account signs in. If you've already signed in, change your `role` to `admin` in the `users` table directly.
     - **Missing values:** the API now refuses to start if any required value is missing, and the error names the missing setting.
-14. **Web app:** create `app/ui/.env.local` with:
+14. **Web app:** create `ui/.env.local` with:
     ```
     AMBER_API_ORIGIN=http://127.0.0.1:8000
     ```
-15. **Create the database tables** in `amber_dev` using `app/api/schema.sql` as the reference: `users`, `oauth_tokens`, `audit_log` and **`revoked_sessions`**, plus the `amber_app` grants.
+15. **Create the database tables** in `amber_dev` using `api/schema.sql` as the reference: `users`, `oauth_tokens`, `audit_log` and **`revoked_sessions`**, plus the `amber_app` grants.
 
 ## Part 6 — Run it
 
 16. Start the API:
     ```bash
-    cd app/api && uv sync && uv run uvicorn amber.main:create_app --factory --reload --port 8000
+    cd api && uv sync && uv run python main.py
     ```
-17. Start the web app (`cd app/ui && pnpm dev`) and open **http://localhost:3000**. Click **Continue with Google** and approve the consent screen, which includes the Drive permission. You should land on `/search` signed in, and Profile should show Google Drive as **Connected**.
+17. Start the web app (`cd ui && pnpm dev`) and open **http://localhost:3000**. Click **Continue with Google** and approve the consent screen, which includes the Drive permission. You should land on `/search` signed in, and Profile should show Google Drive as **Connected**.
 
 **If something goes wrong:**
 - **`redirect_uri_mismatch`:** fix step 7 so it matches `AMBER_PUBLIC_BASE_URL` exactly.

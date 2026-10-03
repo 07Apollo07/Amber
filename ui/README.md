@@ -1,11 +1,11 @@
 # Amber UI
 
-Next.js 16 front end for Amber. Sign-in is real (Phase 2): Google sign-in with the Drive permission, handled by the API in `app/api`. Search, upload and admin data aren't connected yet. Those lists show empty states, and their buttons show a "demo only" toast (`demoAction` in `lib/demo.ts`).
+Next.js 16 front end for Amber. Sign-in is real (Phase 2): Google sign-in with the Drive permission, handled by the API in `api`. Search, upload and admin data aren't connected yet. Those lists show empty states, and their buttons show a "demo only" toast (`demoAction` in `lib/demo.ts`).
 
 ```bash
 cp .env.example .env.local   # AMBER_API_ORIGIN, defaults to http://127.0.0.1:8000
 pnpm install
-pnpm dev          # http://localhost:3000 (start the API first, see app/api/README.md)
+pnpm dev          # http://localhost:3000 (start the API first, see api/README.md)
 pnpm lint && pnpm build
 ```
 

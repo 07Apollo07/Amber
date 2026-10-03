@@ -7,7 +7,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from cryptography.fernet import Fernet
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     env: Literal["dev", "test", "prod"] = "dev"
 
-    # Where `python -m amber.main` listens. In a container use AMBER_HOST=0.0.0.0 and the
+    # Where `python main.py` listens. In a container use AMBER_HOST=0.0.0.0 and the
     # platform's port (Cloud Run sets $PORT).
     host: str = "127.0.0.1"
     port: int = 8000
@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     firebase_project_id: str = ""
     firebase_web_api_key: SecretStr = SecretStr("")
 
+    # Google service-account key file used by google.auth.default() (Firebase Admin, KMS).
+    # Read from GOOGLE_APPLICATION_CREDENTIALS (no AMBER_ prefix), in the environment or .env.
+    # A relative path is resolved against the api folder. Unset: use the ambient credentials
+    # (e.g. the Cloud Run service account).
+    google_application_credentials: str | None = Field(default=None, validation_alias="GOOGLE_APPLICATION_CREDENTIALS")
+
     # Fernet key that encrypts the short-lived OAuth state/PKCE cookie.
     state_cookie_key: SecretStr = SecretStr("")
 
@@ -45,8 +51,6 @@ class Settings(BaseSettings):
     # In GCP the API reaches Cloud SQL through the Cloud SQL Auth Proxy sidecar on 127.0.0.1
     # (private IP, --auto-iam-authn), so the DSN carries no password.
     database_dsn: SecretStr = SecretStr("")
-    db_pool_min: int = 1
-    db_pool_max: int = 10
 
     # Proxies allowed to report the client IP via X-Forwarded-For (the GCP load balancer's
     # ranges, the Next.js dev server). Comma-separated CIDRs. Empty: trust no header.

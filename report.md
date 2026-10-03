@@ -1,12 +1,12 @@
 # Amber: Code Audit Report
 
 **Date:** 2026-10-03
-**Scope:** `app/api` (FastAPI) and `app/ui` (Next.js), as of Phase 2 (Google sign-in with Drive permission)
+**Scope:** `api` (FastAPI) and `ui` (Next.js), as of Phase 2 (Google sign-in with Drive permission)
 **Status:** all security issues and all but one logic bug are fixed. The duplicated and unused code is listed but not changed yet.
 
 ## 1. Action required
 
-1. **Create the `revoked_sessions` table.** Single-device sign-out needs it. The definition and grants are in `app/api/schema.sql`:
+1. **Create the `revoked_sessions` table.** Single-device sign-out needs it. The definition and grants are in `api/schema.sql`:
 
    ```sql
    CREATE TABLE IF NOT EXISTS revoked_sessions (
@@ -50,13 +50,13 @@
 | L2 | Dropped files appeared as "Queued" rows that never progressed, which looked like real pending uploads. | ✅ Fixed | No fake rows. Dropping files now says uploading isn't available yet. |
 | L3 | Quick answer and Chat contain answer-rendering code that no current state reaches. | Kept on purpose | It's the hook where Phase 5's real answers plug in. It doesn't affect current behaviour. |
 | L4 | The login audit row computed "Drive connected" differently from `/api/me`, so the two could disagree. | ✅ Fixed | One shared rule, `models.drive_connected(has_refresh_token, scopes)`, used by both. |
-| L5 | The cookie-name comment in `app/ui/lib/auth-paths.ts` was out of date. | ✅ Fixed | Comment corrected. |
+| L5 | The cookie-name comment in `ui/lib/auth-paths.ts` was out of date. | ✅ Fixed | Comment corrected. |
 | L6 | `PLAN.md` Phase 1 described MSW, `middleware.ts`, an OpenAPI contract and a light/dark theme. None of these exist. | ✅ Fixed | `PLAN.md` now matches the code. Phase 2 also records the new sign-out, rate-limit and audit-IP behaviour. |
 
 ## 4. Duplicated and unused code (not changed yet)
 
 **Duplicated**
-1. The return-to safety regex is copied in `amber/api/auth.py` (`_SAFE_PATH`) and `app/ui/lib/auth-paths.ts` (`safeReturnTo`).
+1. The return-to safety regex is copied in `amber/api/auth.py` (`_SAFE_PATH`) and `ui/lib/auth-paths.ts` (`safeReturnTo`).
 2. Cookie names are defined in `security.cookie_names()` and again in `lib/auth-paths.ts`.
 3. The API address default (`http://127.0.0.1:8000`) is in both `next.config.ts` and `lib/session.ts`.
 4. Cookie attributes (`path`, `secure`, `samesite`) are repeated across `security.py` and `auth.py`.

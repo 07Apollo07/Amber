@@ -1,4 +1,7 @@
-"""SQL for users, OAuth tokens and the audit log. Every query is parameterized."""
+"""SQL for users, OAuth tokens, sessions and the audit log. Every query is parameterized.
+
+Rows come back as dicts keyed by column name.
+"""
 
 import uuid
 from datetime import datetime
@@ -6,25 +9,26 @@ from typing import Any
 
 import psycopg2.extras
 
-from amber.models import OAuthToken, Role, User
-from amber.util.db import Db
+from amber.util.db import Connection, execute, fetch_one
+
+Row = dict[str, Any]
 
 # ---- users ----
 
 
-def get_user_by_firebase_uid(db: Db, firebase_uid: str) -> User | None:
-    row = db.one("SELECT * FROM users WHERE firebase_uid = %(uid)s", {"uid": firebase_uid})
-    return User.from_row(row) if row else None
+def get_user_by_firebase_uid(conn: Connection, firebase_uid: str) -> Row | None:
+    row = fetch_one(conn, "SELECT * FROM users WHERE firebase_uid = %(uid)s", {"uid": firebase_uid})
+    return row
 
 
-def lock_user_by_google_sub(db: Db, google_sub: str) -> User | None:
+def lock_user_by_google_sub(conn: Connection, google_sub: str) -> Row | None:
     """Row-locks the user for the rest of the transaction, so concurrent sign-ins serialize."""
-    row = db.one("SELECT * FROM users WHERE google_sub = %(sub)s FOR UPDATE", {"sub": google_sub})
-    return User.from_row(row) if row else None
+    row = fetch_one(conn, "SELECT * FROM users WHERE google_sub = %(sub)s FOR UPDATE", {"sub": google_sub})
+    return row
 
 
 def insert_user(
-    db: Db,
+    conn: Connection,
     *,
     firebase_uid: str,
     google_sub: str,
@@ -32,10 +36,11 @@ def insert_user(
     domain: str | None,
     name: str,
     picture_url: str | None,
-    role: Role,
-) -> User | None:
+    role: str,
+) -> Row | None:
     """Returns None if a concurrent sign-in created the same user first."""
-    row = db.one(
+    row = fetch_one(
+        conn,
         """
         INSERT INTO users (firebase_uid, google_sub, email, domain, name, picture_url, role)
         VALUES (%(firebase_uid)s, %(google_sub)s, %(email)s, %(domain)s, %(name)s, %(picture_url)s, %(role)s)
@@ -52,11 +57,11 @@ def insert_user(
             "role": role,
         },
     )
-    return User.from_row(row) if row else None
+    return row
 
 
 def update_user_profile(
-    db: Db,
+    conn: Connection,
     user_id: uuid.UUID,
     *,
     firebase_uid: str,
@@ -64,10 +69,11 @@ def update_user_profile(
     domain: str | None,
     name: str,
     picture_url: str | None,
-    role: Role,
-) -> User:
+    role: str,
+) -> Row:
     """Profile fields follow Google on every sign-in; `role` only changes via bootstrap promotion."""
-    row = db.one(
+    row = fetch_one(
+        conn,
         """
         UPDATE users
            SET firebase_uid = %(firebase_uid)s, email = %(email)s, domain = %(domain)s, name = %(name)s,
@@ -87,23 +93,26 @@ def update_user_profile(
     )
     if row is None:
         raise LookupError(f"user {user_id} vanished mid-transaction")
-    return User.from_row(row)
+    return row
 
 
-def touch_last_login(db: Db, user_id: uuid.UUID) -> None:
-    db.execute("UPDATE users SET last_login_at = now() WHERE id = %(id)s", {"id": user_id})
+def touch_last_login(conn: Connection, user_id: uuid.UUID) -> None:
+    execute(conn, "UPDATE users SET last_login_at = now() WHERE id = %(id)s", {"id": user_id})
 
 
 # ---- OAuth tokens ----
 
 
-def get_token(db: Db, user_id: uuid.UUID) -> OAuthToken | None:
-    row = db.one("SELECT * FROM oauth_tokens WHERE user_id = %(id)s", {"id": user_id})
-    return OAuthToken.from_row(row) if row else None
+def get_token(conn: Connection, user_id: uuid.UUID) -> Row | None:
+    row = fetch_one(conn, "SELECT * FROM oauth_tokens WHERE user_id = %(id)s", {"id": user_id})
+    if row:
+        row["encrypted_refresh_token"] = bytes(row["encrypted_refresh_token"])  # memoryview -> bytes
+    return row
 
 
-def save_token(db: Db, user_id: uuid.UUID, *, encrypted: bytes, key_version: str, scopes: str) -> None:
-    db.execute(
+def save_token(conn: Connection, user_id: uuid.UUID, *, encrypted: bytes, key_version: str, scopes: str) -> None:
+    execute(
+        conn,
         """
         INSERT INTO oauth_tokens (user_id, encrypted_refresh_token, kms_key_version, scopes)
         VALUES (%(id)s, %(blob)s, %(version)s, %(scopes)s)
@@ -117,23 +126,25 @@ def save_token(db: Db, user_id: uuid.UUID, *, encrypted: bytes, key_version: str
     )
 
 
-def update_token_scopes(db: Db, user_id: uuid.UUID, scopes: str) -> None:
-    db.execute(
+def update_token_scopes(conn: Connection, user_id: uuid.UUID, scopes: str) -> None:
+    execute(
+        conn,
         "UPDATE oauth_tokens SET scopes = %(scopes)s, updated_at = now() WHERE user_id = %(id)s",
         {"id": user_id, "scopes": scopes},
     )
 
 
-def delete_token(db: Db, user_id: uuid.UUID) -> None:
-    db.execute("DELETE FROM oauth_tokens WHERE user_id = %(id)s", {"id": user_id})
+def delete_token(conn: Connection, user_id: uuid.UUID) -> None:
+    execute(conn, "DELETE FROM oauth_tokens WHERE user_id = %(id)s", {"id": user_id})
 
 
 # ---- signed-out sessions ----
 
 
-def revoke_session(db: Db, token_hash: bytes, expires_at: datetime) -> None:
-    db.execute("DELETE FROM revoked_sessions WHERE expires_at < now()")  # opportunistic cleanup
-    db.execute(
+def revoke_session(conn: Connection, token_hash: bytes, expires_at: datetime) -> None:
+    execute(conn, "DELETE FROM revoked_sessions WHERE expires_at < now()")  # opportunistic cleanup
+    execute(
+        conn,
         """
         INSERT INTO revoked_sessions (token_hash, expires_at) VALUES (%(hash)s, %(expires_at)s)
         ON CONFLICT (token_hash) DO NOTHING
@@ -142,9 +153,9 @@ def revoke_session(db: Db, token_hash: bytes, expires_at: datetime) -> None:
     )
 
 
-def is_session_revoked(db: Db, token_hash: bytes) -> bool:
-    row = db.one(
-        "SELECT 1 AS hit FROM revoked_sessions WHERE token_hash = %(hash)s", {"hash": psycopg2.Binary(token_hash)}
+def is_session_revoked(conn: Connection, token_hash: bytes) -> bool:
+    row = fetch_one(
+        conn, "SELECT 1 AS hit FROM revoked_sessions WHERE token_hash = %(hash)s", {"hash": psycopg2.Binary(token_hash)}
     )
     return row is not None
 
@@ -153,7 +164,7 @@ def is_session_revoked(db: Db, token_hash: bytes) -> bool:
 
 
 def insert_audit(
-    db: Db,
+    conn: Connection,
     *,
     actor_user_id: uuid.UUID | None,
     actor_email: str | None,
@@ -162,7 +173,8 @@ def insert_audit(
     detail: dict[str, Any] | None,
     ip: str | None,
 ) -> None:
-    db.execute(
+    execute(
+        conn,
         """
         INSERT INTO audit_log (actor_user_id, actor_email, action, target, detail, ip)
         VALUES (%(actor_user_id)s, %(actor_email)s, %(action)s, %(target)s, %(detail)s, %(ip)s)

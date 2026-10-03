@@ -1,41 +1,25 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import FastAPI, Request, Response
 
 from amber.api import auth, me
 from amber.util.config import Settings, get_settings
-from amber.util.crypto import build_token_cipher
-from amber.util.db import Database
-from amber.util.firebase import FirebaseIdentity
-from amber.util.google_oauth import GoogleOAuthClient
+from amber.util.firebase import init_firebase
 from amber.util.ratelimit import RateLimited, rate_limited_response
 
 
-def create_app(settings: Settings | None = None, **overrides) -> FastAPI:
-    """Run with `python -m amber.main` (see run() below).
-
-    `overrides` (database, google, firebase, cipher) let tests swap external services."""
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """Run with `python main.py` from the api folder (see run() below)."""
     settings = settings or get_settings()
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        http = httpx.Client()
-        state = app.state
-        state.settings = settings
-        state.rate_limiters = {}
-        owns_db = "database" not in overrides
-        state.database = Database.from_settings(settings) if owns_db else overrides["database"]
-        state.google = overrides.get("google") or GoogleOAuthClient(settings, http)
-        state.firebase = overrides.get("firebase") or FirebaseIdentity(settings, http)
-        state.cipher = overrides.get("cipher") or build_token_cipher(settings)
-        try:
-            yield
-        finally:
-            http.close()  # noqa: ASYNC212 (shutdown only; nothing else is running)
-            if owns_db:
-                state.database.close()
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        app.state.settings = settings
+        app.state.rate_hits = {}
+        if settings.env != "test":  # tests never call Firebase, so they need no Google credentials
+            init_firebase(settings)
+        yield
 
     is_prod = settings.env == "prod"
     app = FastAPI(
@@ -72,7 +56,7 @@ def run() -> None:
 
     settings = get_settings()
     uvicorn.run(
-        "amber.main:create_app",
+        "main:create_app",
         factory=True,
         host=settings.host,
         port=settings.port,

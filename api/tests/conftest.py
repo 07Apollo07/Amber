@@ -3,23 +3,17 @@ they're safe to run anywhere, at any time."""
 
 import base64
 import os
-from collections.abc import Iterator
+from collections.abc import Generator
 from urllib.parse import parse_qs, urlsplit
 
-import httpx
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from amber.main import create_app
 from amber.util.config import Settings
-from amber.util.google_oauth import GoogleOAuthClient
+from main import create_app
 
 BASE_URL = "https://amber.test"
-
-
-class NoFirebase:
-    """Stands in for Firebase so building the app doesn't need cloud credentials."""
 
 
 @pytest.fixture
@@ -35,15 +29,9 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def client(settings) -> Iterator[TestClient]:
-    # No database: only endpoints that don't touch Postgres are exercised here.
-    app = create_app(
-        settings,
-        database=None,
-        google=GoogleOAuthClient(settings, httpx.Client()),
-        firebase=NoFirebase(),
-    )
-    with TestClient(app, base_url=BASE_URL) as c:
+def client(settings) -> Generator[TestClient, None, None]:
+    # env="test" skips Firebase start-up, and only endpoints that don't touch Postgres are exercised.
+    with TestClient(create_app(settings), base_url=BASE_URL) as c:
         yield c
 
 

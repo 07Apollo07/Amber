@@ -7,43 +7,43 @@ from pydantic import ValidationError
 
 from amber.util import config
 from amber.util.config import Settings
-from amber.util.crypto import LocalKeyWrapper, TokenCipher
+from amber.util.crypto import decrypt_token, encrypt_token
 from amber.util.security import cookie_names
 
 
 @pytest.fixture
-def cipher() -> TokenCipher:
-    return TokenCipher(LocalKeyWrapper(os.urandom(32)))
+def key_settings() -> Settings:
+    return Settings(env="test", local_token_key=base64.urlsafe_b64encode(os.urandom(32)).decode())
 
 
-def test_roundtrip(cipher):
-    blob, version = cipher.encrypt("refresh-token", aad="user-1")
+def test_roundtrip(key_settings):
+    blob, version = encrypt_token(key_settings, "refresh-token", aad="user-1")
     assert version == "local" and b"refresh-token" not in blob
-    assert cipher.decrypt(blob, aad="user-1") == "refresh-token"
+    assert decrypt_token(key_settings, blob, aad="user-1") == "refresh-token"
 
 
-def test_each_encryption_uses_a_fresh_data_key(cipher):
-    a, _ = cipher.encrypt("same", aad="u")
-    b, _ = cipher.encrypt("same", aad="u")
+def test_each_encryption_uses_a_fresh_data_key(key_settings):
+    a, _ = encrypt_token(key_settings, "same", aad="u")
+    b, _ = encrypt_token(key_settings, "same", aad="u")
     assert a != b
 
 
-def test_ciphertext_is_bound_to_its_user(cipher):
-    blob, _ = cipher.encrypt("refresh-token", aad="user-1")
+def test_ciphertext_is_bound_to_its_user(key_settings):
+    blob, _ = encrypt_token(key_settings, "refresh-token", aad="user-1")
     with pytest.raises(Exception):  # noqa: B017 (cryptography raises InvalidTag)
-        cipher.decrypt(blob, aad="user-2")
+        decrypt_token(key_settings, blob, aad="user-2")
 
 
-def test_tampering_is_detected(cipher):
-    blob, _ = cipher.encrypt("refresh-token", aad="user-1")
+def test_tampering_is_detected(key_settings):
+    blob, _ = encrypt_token(key_settings, "refresh-token", aad="user-1")
     tampered = blob[:-1] + bytes([blob[-1] ^ 1])
     with pytest.raises(Exception):  # noqa: B017
-        cipher.decrypt(tampered, aad="user-1")
+        decrypt_token(key_settings, tampered, aad="user-1")
 
 
-def test_unknown_blob_version_is_rejected(cipher):
+def test_unknown_blob_version_is_rejected(key_settings):
     with pytest.raises(ValueError):
-        cipher.decrypt(b"\x09rest", aad="u")
+        decrypt_token(key_settings, b"\x09rest", aad="u")
 
 
 REQUIRED = {

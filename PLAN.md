@@ -32,7 +32,7 @@ Firebase and Postgres already exist, so Amber **connects to them, configures the
 - Check the version (≥ 14) and that **pgvector ≥ 0.5** is available (HNSW). On Cloud SQL it's built in, so `CREATE EXTENSION vector;` is enough.
 - Create a dedicated database `amber` (plus `amber_dev`/`amber_staging`, or a separate instance) so Amber is isolated from anything else on the instance. **Never point dev or tests at the prod DB.**
 - Roles (least privilege):
-  - `amber_migrator` owns the schema. Tables are created **manually** by the project owner (reference: `app/api/schema.sql`); the app never creates or alters them.
+  - `amber_migrator` owns the schema. Tables are created **manually** by the project owner (reference: `api/schema.sql`); the app never creates or alters them.
   - `amber_app` (API): DML on app tables, and INSERT-only on `audit_log`. RLS is enforced and it does not bypass RLS.
   - `amber_worker` (ingestion): write access to `documents`/`chunks`/`document_access` only.
 - Connectivity:
@@ -45,10 +45,11 @@ Firebase and Postgres already exist, so Amber **connects to them, configures the
 
 ## Repo layout (monorepo)
 ```
-app/ui/        Next.js 16 (App Router, TS, Tailwind, shadcn/ui, TanStack Query, zod)
-app/api/        FastAPI (Python 3.12, uv, psycopg2 with hand-written parameterized SQL, pydantic v2); schema.sql
+ui/            Next.js 16 (App Router, TS, Tailwind, shadcn/ui, TanStack Query, zod)
+api/           FastAPI (Python 3.12, uv, psycopg2 with hand-written parameterized SQL, pydantic v2); schema.sql
+  main.py          app factory + `python main.py` entry point
   amber/api/       routers: auth, me, documents, collections, search, chat, drive, admin
-  amber/util/      config, security (session, RBAC, CSRF), db (psycopg2 pool), audit
+  amber/util/      config, security (session, RBAC, CSRF), db (psycopg2, one connection per request), audit
   amber/repository.py  all SQL (parameterized)
   amber/rag/       LangChain pipeline: splitter, AclHybridRetriever, reranker, LCEL chains, trace callback
     providers/       llm.py: LangChain model factories (ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings) chosen by settings
@@ -58,9 +59,9 @@ docker-compose.yml      api, worker, web, fake-gcs, Cloud SQL Auth Proxy → clo
 ```
 
 ## Phase 1: UI (built first, against mocks)
-✅ built. `app/ui` uses Next.js 16 with shadcn/ui, dark theme only. There is no mock API layer: pages show empty states until their API exists, and unbuilt actions show a "demo only" toast. `proxy.ts` (Next.js 16's name for middleware) handles route guards, redirecting to /login when there is no session cookie. Admin routes are hidden in the UI and also enforced server-side. UI types live in `lib/types.ts`.
+✅ built. `ui` uses Next.js 16 with shadcn/ui, dark theme only. There is no mock API layer: pages show empty states until their API exists, and unbuilt actions show a "demo only" toast. `proxy.ts` (Next.js 16's name for middleware) handles route guards, redirecting to /login when there is no session cookie. Admin routes are hidden in the UI and also enforced server-side. UI types live in `lib/types.ts`.
 
-Pages (`app/ui/app/`):
+Pages (`ui/app/`):
 - **`/login`**: Amber branding and a "Continue with Google" button. A consent explainer lists the requested Drive scope and why it's needed: reading files you pick and **saving your uploads to your Drive**.
 - **`/search`**: A mode toggle (Quick | Chat) and a filter bar (Sources, Collections/tags, File type, Date range).
   - *Quick*: an answer card with inline `[1]` citations, a ranked source list below, feedback (👍/👎 + comment), and copy.
@@ -107,7 +108,7 @@ UI security from day one:
 - Scope rationale: `drive.file` covers only files picked through the Picker **and files/folders Amber itself creates**, so desktop uploads into the user's Drive need no extra scope. It avoids Google's restricted-scope CASA audit and is least privilege. Broader whole-Drive indexing can come later under `drive.readonly`, after verification.
 
 ## Phase 3: Backend and data model (existing Postgres + pgvector)
-No ORM and no migration framework. Tables are **created manually** in Postgres by the project owner; the app, CI and deploy scripts never create or alter them. **`app/api/schema.sql`** is the reference definition of what the code expects; Phase 3 adds the pgvector extension, new tables, grants and RLS policies to it. All queries are hand-written, parameterized psycopg2 SQL in `amber/repository.py`.
+No ORM and no migration framework. Tables are **created manually** in Postgres by the project owner; the app, CI and deploy scripts never create or alter them. **`api/schema.sql`** is the reference definition of what the code expects; Phase 3 adds the pgvector extension, new tables, grants and RLS policies to it. All queries are hand-written, parameterized psycopg2 SQL in `amber/repository.py`.
 
 Tables:
 
@@ -224,7 +225,7 @@ Gemini API access:
 - **Retention:** user "delete my history" hard-deletes the user's data. Account deletion revokes the Google token and purges the user's docs and chunks.
 
 ## Verification
-- **Phase 1:** `pnpm dev` in `app/ui`. Use Playwright to click through every page in both modes, check that admin routes redirect for members, and check that a markdown-XSS payload in a mock answer renders inert.
+- **Phase 1:** `pnpm dev` in `ui`. Use Playwright to click through every page in both modes, check that admin routes redirect for members, and check that a markdown-XSS payload in a mock answer renders inert.
 - **Infra smoke check (before step 3):** connect through the Cloud SQL connector as `amber_app` to `amber_dev`, run `SELECT extversion FROM pg_extension WHERE extname='vector'`, and confirm `amber_app` can't `UPDATE audit_log`. Sign in with Google against the dev Firebase project and verify the ID token in FastAPI.
 - **Local full stack:** `docker compose up` (api, worker, web, fake-gcs, Cloud SQL Auth Proxy → cloud `amber_dev`, dev Firebase project).
 - **pytest:** unit tests only. They never connect to a database or call external services, so they can't affect data whenever they run. Database-backed and timing-dependent tests were deliberately removed; verify DB behaviour manually against a dev database. Firebase token verification is mocked in unit tests and hits the dev Firebase project in integration tests.

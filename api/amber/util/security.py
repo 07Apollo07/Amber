@@ -3,18 +3,16 @@
 import hashlib
 import hmac
 import secrets
-from collections.abc import Iterator
-from typing import Annotated
+from collections.abc import Generator
+from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request, Response, status
 
 from amber import repository
-from amber.models import User
+from amber.util import db, firebase
 from amber.util.config import Settings
-from amber.util.crypto import TokenCipher
-from amber.util.db import Db
-from amber.util.firebase import FirebaseIdentity, SessionInvalid
-from amber.util.google_oauth import GoogleOAuthClient
+from amber.util.db import Connection
+from amber.util.firebase import SessionInvalid
 
 CSRF_HEADER = "X-Amber-CSRF"
 
@@ -31,36 +29,21 @@ def cookie_names(settings: Settings) -> tuple[str, str, str]:
     return f"{prefix}amber_session", f"{prefix}amber_csrf", f"{prefix}amber_oauth"
 
 
-# ---- app-scoped dependencies (built once in create_app, swappable in tests) ----
+# ---- request dependencies ----
 
 
 def get_app_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-def get_db(request: Request) -> Iterator[Db]:
-    """One pooled connection per request; uncommitted work is rolled back afterwards."""
-    with request.app.state.database.connection() as db:
-        yield db
-
-
-def get_google(request: Request) -> GoogleOAuthClient:
-    return request.app.state.google
-
-
-def get_firebase(request: Request) -> FirebaseIdentity:
-    return request.app.state.firebase
-
-
-def get_cipher(request: Request) -> TokenCipher:
-    return request.app.state.cipher
+def get_db(request: Request) -> Generator[Connection, None, None]:
+    """One connection per request; uncommitted work is discarded when it closes."""
+    with db.connect(request.app.state.settings) as conn:
+        yield conn
 
 
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
-DbDep = Annotated[Db, Depends(get_db)]
-GoogleDep = Annotated[GoogleOAuthClient, Depends(get_google)]
-FirebaseDep = Annotated[FirebaseIdentity, Depends(get_firebase)]
-CipherDep = Annotated[TokenCipher, Depends(get_cipher)]
+DbDep = Annotated[Connection, Depends(get_db)]
 
 
 # ---- cookies ----
@@ -118,40 +101,40 @@ def session_hash(cookie: str) -> bytes:
     return hashlib.sha256(cookie.encode()).digest()
 
 
-def verified_session(request: Request, settings: Settings, db: Db, firebase: FirebaseIdentity) -> tuple[str, dict]:
+def verified_session(request: Request, settings: Settings, conn: Connection) -> tuple[str, dict]:
     """Returns (cookie, claims) for a valid, unrevoked session cookie, or raises 401."""
     session_name, _, _ = cookie_names(settings)
     cookie = request.cookies.get(session_name)
     if not cookie:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in")
     try:
-        claims = firebase.verify_session_cookie(cookie)  # signature, expiry, revoke-all
+        claims = firebase.verify_session_cookie(settings, cookie)  # signature, expiry, revoke-all
     except SessionInvalid:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired") from None
-    if repository.is_session_revoked(db, session_hash(cookie)):  # signed out on this device
+    if repository.is_session_revoked(conn, session_hash(cookie)):  # signed out on this device
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired")
     return cookie, claims
 
 
-def current_user(request: Request, settings: SettingsDep, db: DbDep, firebase: FirebaseDep) -> User:
-    _, claims = verified_session(request, settings, db, firebase)
-    user = repository.get_user_by_firebase_uid(db, claims["uid"])
+def current_user(request: Request, settings: SettingsDep, conn: DbDep) -> dict[str, Any]:
+    _, claims = verified_session(request, settings, conn)
+    user = repository.get_user_by_firebase_uid(conn, claims["uid"])
     if user is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in")
-    if user.status != "active":
+    if user["status"] != "active":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account deactivated")
     return user
 
 
-CurrentUser = Annotated[User, Depends(current_user)]
+CurrentUser = Annotated[dict[str, Any], Depends(current_user)]
 
 
-def require_admin(user: CurrentUser) -> User:
+def require_admin(user: CurrentUser) -> dict[str, Any]:
     # Roles come from Postgres, never from client-supplied claims.
-    if user.role != "admin":
+    if user["role"] != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Admins only")
     return user
 
 
-AdminUser = Annotated[User, Depends(require_admin)]
+AdminUser = Annotated[dict[str, Any], Depends(require_admin)]
 CsrfProtected = Depends(require_csrf)

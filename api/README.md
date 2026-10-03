@@ -2,7 +2,7 @@
 
 FastAPI backend for Amber. Phase 2 covers authentication: Google sign-in with the Drive permission on one consent screen, Firebase session cookies, and encrypted storage of the Drive refresh token.
 
-Postgres is accessed with **psycopg2** through a small connection pool (`amber/util/db.py`). All SQL is hand-written and parameterized in `amber/repository.py`. There is no ORM, and the app never creates or alters tables. You create them in Postgres yourself; `schema.sql` is the reference definition of the tables the code expects.
+Postgres is accessed with **psycopg2** with one connection per request (`amber/util/db.py`). All SQL is hand-written and parameterized in `amber/repository.py`. There is no ORM, and the app never creates or alters tables. You create them in Postgres yourself; `schema.sql` is the reference definition of the tables the code expects.
 
 ## How sign-in works
 
@@ -34,14 +34,12 @@ No Google or Firebase token ever reaches browser JavaScript. Every request verif
 ```bash
 cp .env.example .env              # fill in the values
 uv sync
-gcloud auth application-default login                              # Google credentials for Firebase Admin
-gcloud auth application-default set-quota-project <firebase-project-id>
-uv run python -m amber.main          # http://127.0.0.1:8000, auto-reloads when AMBER_ENV=dev
+uv run python main.py                # http://127.0.0.1:8000, auto-reloads when AMBER_ENV=dev
 ```
 
-Firebase Admin (session cookies, revocation) needs Google credentials, so the API won't start without them. Your Google account needs the Firebase Authentication Admin role on the project. Alternatively, set `GOOGLE_APPLICATION_CREDENTIALS` to a dev service-account key that's kept out of the repo.
+Firebase Admin (session cookies, revocation) needs Google credentials, so the API won't start without them. Set `GOOGLE_APPLICATION_CREDENTIALS` in `api/.env` to your service-account key file. A relative path is resolved against the `api` folder. The service account needs the Firebase Authentication Admin role. Key files are git-ignored; never commit one.
 
-Then run the web app (`app/ui`, `pnpm dev`) and open http://localhost:3000. The web app proxies `/api/*` here, so cookies stay first-party.
+Then run the web app (`ui`, `pnpm dev`) and open http://localhost:3000. The web app proxies `/api/*` here, so cookies stay first-party.
 
 Over plain-http localhost, cookies drop the `__Host-` prefix because browsers only accept it over https. They are still Secure, HttpOnly and SameSite.
 
