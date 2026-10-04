@@ -9,7 +9,7 @@ from typing import Any
 
 import psycopg2.extras
 
-from amber.util.db import Connection, execute, fetch_one
+from amber.util.db import Connection, execute, fetch_all, fetch_one
 
 Row = dict[str, Any]
 
@@ -188,3 +188,677 @@ def insert_audit(
             "ip": ip,
         },
     )
+
+
+# ---- Phase 3: RLS Context & Domain Repository ----
+
+
+def set_app_user_context(conn: Connection, user_email: str, user_domain: str | None) -> None:
+    """Sets local transaction configuration for Row-Level Security policies."""
+    execute(conn, "SELECT set_config('app.user_email', %(email)s, true)", {"email": user_email})
+    execute(conn, "SELECT set_config('app.user_domain', %(domain)s, true)", {"domain": user_domain or ""})
+
+
+# ---- Documents ----
+
+
+def upsert_document(
+    conn: Connection,
+    *,
+    owner_id: uuid.UUID,
+    origin: str,
+    drive_file_id: str | None = None,
+    title: str,
+    file_type: str,
+    file_size_bytes: int | None = None,
+    mime_type: str | None = None,
+    sha256: str | None = None,
+    status: str = "indexed",
+    status_message: str | None = None,
+    sharing_option: str = "private",
+) -> Row:
+    """Inserts or updates a document record."""
+    existing = None
+    if drive_file_id:
+        existing = fetch_one(
+            conn,
+            "SELECT id FROM documents WHERE owner_id = %(owner_id)s AND drive_file_id = %(drive_file_id)s",
+            {"owner_id": owner_id, "drive_file_id": drive_file_id},
+        )
+    elif sha256:
+        existing = fetch_one(
+            conn,
+            "SELECT id FROM documents WHERE owner_id = %(owner_id)s AND sha256 = %(sha256)s",
+            {"owner_id": owner_id, "sha256": sha256},
+        )
+
+    if existing:
+        row = fetch_one(
+            conn,
+            """
+            UPDATE documents
+            SET title = %(title)s,
+                file_type = %(file_type)s,
+                file_size_bytes = %(file_size_bytes)s,
+                mime_type = %(mime_type)s,
+                sha256 = %(sha256)s,
+                status = %(status)s,
+                status_message = %(status_message)s,
+                sharing_option = %(sharing_option)s,
+                updated_at = now()
+            WHERE id = %(id)s
+            RETURNING *
+            """,
+            {
+                "id": existing["id"],
+                "title": title,
+                "file_type": file_type,
+                "file_size_bytes": file_size_bytes,
+                "mime_type": mime_type,
+                "sha256": sha256,
+                "status": status,
+                "status_message": status_message,
+                "sharing_option": sharing_option,
+            },
+        )
+    else:
+        row = fetch_one(
+            conn,
+            """
+            INSERT INTO documents (owner_id, origin, drive_file_id, title, file_type, file_size_bytes, mime_type, sha256, status, status_message, sharing_option, updated_at)
+            VALUES (%(owner_id)s, %(origin)s, %(drive_file_id)s, %(title)s, %(file_type)s, %(file_size_bytes)s, %(mime_type)s, %(sha256)s, %(status)s, %(status_message)s, %(sharing_option)s, now())
+            RETURNING *
+            """,
+            {
+                "owner_id": owner_id,
+                "origin": origin,
+                "drive_file_id": drive_file_id,
+                "title": title,
+                "file_type": file_type,
+                "file_size_bytes": file_size_bytes,
+                "mime_type": mime_type,
+                "sha256": sha256,
+                "status": status,
+                "status_message": status_message,
+                "sharing_option": sharing_option,
+            },
+        )
+    if row is None:
+        raise RuntimeError("Failed to upsert document")
+    return row
+
+
+def get_document(conn: Connection, document_id: uuid.UUID) -> Row | None:
+    return fetch_one(conn, "SELECT * FROM documents WHERE id = %(id)s", {"id": document_id})
+
+
+def get_document_by_drive_file_id(conn: Connection, owner_id: uuid.UUID, drive_file_id: str) -> Row | None:
+    return fetch_one(
+        conn,
+        "SELECT * FROM documents WHERE owner_id = %(owner_id)s AND drive_file_id = %(drive_file_id)s",
+        {"owner_id": owner_id, "drive_file_id": drive_file_id},
+    )
+
+
+def list_documents(conn: Connection, limit: int = 100, offset: int = 0) -> list[Row]:
+    return fetch_all(
+        conn,
+        "SELECT * FROM documents ORDER BY created_at DESC LIMIT %(limit)s OFFSET %(offset)s",
+        {"limit": limit, "offset": offset},
+    )
+
+
+def delete_document(conn: Connection, document_id: uuid.UUID) -> None:
+    execute(conn, "DELETE FROM documents WHERE id = %(id)s", {"id": document_id})
+
+
+def update_document_status(
+    conn: Connection,
+    document_id: uuid.UUID,
+    status: str,
+    status_message: str | None = None,
+) -> Row | None:
+    return fetch_one(
+        conn,
+        """
+        UPDATE documents
+        SET status = %(status)s,
+            status_message = %(status_message)s,
+            last_synced_at = CASE WHEN %(status)s = 'indexed' THEN now() ELSE last_synced_at END,
+            updated_at = now()
+        WHERE id = %(id)s
+        RETURNING *
+        """,
+        {
+            "id": document_id,
+            "status": status,
+            "status_message": status_message,
+        },
+    )
+
+
+# ---- Document Access (ACL) ----
+
+
+def set_document_access(conn: Connection, document_id: uuid.UUID, grants: list[dict[str, Any]]) -> None:
+    """grants: list of dicts with principal_type ('user', 'domain') and principal_value (email or domain string)."""
+    execute(conn, "DELETE FROM document_access WHERE document_id = %(document_id)s", {"document_id": document_id})
+    for grant in grants:
+        principal_type = grant.get("principal_type", grant.get("grant_type", "user"))
+        principal_value = grant.get("principal_value", grant.get("grantee", ""))
+        origin = grant.get("origin", "drive_sync")
+        if not principal_value and principal_type == "user":
+            continue
+        if principal_type not in ("user", "domain"):
+            continue
+        try:
+            execute(
+                conn,
+                """
+                INSERT INTO document_access (document_id, principal_type, principal_value, origin)
+                VALUES (%(document_id)s, %(principal_type)s, %(principal_value)s, %(origin)s)
+                ON CONFLICT (document_id, principal_type, principal_value) DO NOTHING
+                """,
+                {
+                    "document_id": document_id,
+                    "principal_type": principal_type,
+                    "principal_value": principal_value,
+                    "origin": origin,
+                },
+            )
+        except Exception:
+            pass
+
+
+def get_document_access(conn: Connection, document_id: uuid.UUID) -> list[Row]:
+    return fetch_all(
+        conn, "SELECT * FROM document_access WHERE document_id = %(document_id)s", {"document_id": document_id}
+    )
+
+
+# ---- Chunks & Hybrid Search ----
+
+
+def insert_chunk(
+    conn: Connection,
+    *,
+    document_id: uuid.UUID,
+    ord: int,
+    text: str,
+    page: int | None = None,
+    embedding: list[float] | None = None,
+) -> Row:
+    # Format embedding list as pgvector string representation if present
+    emb_str = str(embedding) if embedding else None
+    row = fetch_one(
+        conn,
+        """
+        INSERT INTO chunks (document_id, ord, text, page, embedding)
+        VALUES (%(document_id)s, %(ord)s, %(text)s, %(page)s, %(embedding)s::vector)
+        RETURNING id, document_id, ord, text AS content, page, created_at
+        """,
+        {
+            "document_id": document_id,
+            "ord": ord,
+            "text": text,
+            "page": page,
+            "embedding": emb_str,
+        },
+    )
+    if row is None:
+        raise RuntimeError("Failed to insert chunk")
+    return row
+
+
+def get_chunks_for_document(conn: Connection, document_id: uuid.UUID) -> list[Row]:
+    return fetch_all(
+        conn,
+        "SELECT id, document_id, ord, text AS content, page, created_at FROM chunks WHERE document_id = %(document_id)s ORDER BY ord ASC",
+        {"document_id": document_id},
+    )
+
+
+def delete_chunks_for_document(conn: Connection, document_id: uuid.UUID) -> None:
+    execute(conn, "DELETE FROM chunks WHERE document_id = %(document_id)s", {"document_id": document_id})
+
+
+def hybrid_search_chunks(
+    conn: Connection,
+    user_email: str,
+    user_domain: str | None,
+    query_embedding: list[float] | None = None,
+    query_text: str | None = None,
+    *,
+    limit: int = 40,
+    collection_ids: list[uuid.UUID] | None = None,
+    file_types: list[str] | None = None,
+) -> list[Row]:
+    """Performs hybrid vector cosine + full-text search with RLS document pre-filtering."""
+    set_app_user_context(conn, user_email, user_domain)
+
+    emb_str = str(query_embedding) if query_embedding else None
+
+    # We join chunks with documents (which enforces RLS automatically via policy)
+    # and optional collection_documents / file_types filters.
+    # Note: RLS on documents ensures only permitted documents are visible.
+
+    # Let's construct a flexible query supporting vector distance and/or text ts_rank_cd.
+    # If both query_embedding and query_text are provided, we can combine or use vector distance as primary order.
+    # Let's use cosine distance (<=>) when embedding is provided, and/or ts_rank when query_text is provided.
+
+    params: dict[str, Any] = {
+        "limit": limit,
+        "query_embedding": emb_str,
+        "query_text": query_text or "",
+    }
+
+    filters = []
+    if collection_ids:
+        filters.append(
+            "d.id IN (SELECT document_id FROM collection_documents WHERE collection_id = ANY(%(collection_ids)s))"
+        )
+        params["collection_ids"] = collection_ids
+    if file_types:
+        filters.append("d.file_type = ANY(%(file_types)s)")
+        params["file_types"] = file_types
+
+    where_clause = "WHERE " + " AND ".join(filters) if filters else ""
+
+    if query_embedding and query_text:
+        sql = f"""
+        SELECT c.id, c.document_id, c.ord, c.text AS content, c.page,
+               d.title AS document_title, d.source AS document_source, d.source_url, d.file_type,
+               (c.embedding <=> %(query_embedding)s::vector) AS vector_distance,
+               ts_rank_cd(c.tsv, plainto_tsquery('english', %(query_text)s)) AS text_rank
+          FROM chunks c
+          JOIN documents d ON c.document_id = d.id
+          {where_clause}
+         ORDER BY (c.embedding <=> %(query_embedding)s::vector) ASC
+         LIMIT %(limit)s
+        """
+    elif query_embedding:
+        sql = f"""
+        SELECT c.id, c.document_id, c.ord, c.text AS content, c.page,
+               d.title AS document_title, d.source AS document_source, d.source_url, d.file_type,
+               (c.embedding <=> %(query_embedding)s::vector) AS vector_distance
+          FROM chunks c
+          JOIN documents d ON c.document_id = d.id
+          {where_clause}
+         ORDER BY (c.embedding <=> %(query_embedding)s::vector) ASC
+         LIMIT %(limit)s
+        """
+    elif query_text:
+        sql = f"""
+        SELECT c.id, c.document_id, c.ord, c.text AS content, c.page,
+               d.title AS document_title, d.source AS document_source, d.source_url, d.file_type,
+               ts_rank_cd(c.tsv, plainto_tsquery('english', %(query_text)s)) AS text_rank
+          FROM chunks c
+          JOIN documents d ON c.document_id = d.id
+          {where_clause}
+          AND c.tsv @@ plainto_tsquery('english', %(query_text)s)
+         ORDER BY text_rank DESC
+         LIMIT %(limit)s
+        """
+    else:
+        sql = f"""
+        SELECT c.id, c.document_id, c.ord, c.text AS content, c.page,
+               d.title AS document_title, d.source AS document_source, d.source_url, d.file_type
+          FROM chunks c
+          JOIN documents d ON c.document_id = d.id
+          {where_clause}
+         ORDER BY c.created_at DESC
+         LIMIT %(limit)s
+        """
+
+    return fetch_all(conn, sql, params)
+
+
+def count_hidden_chunks(conn: Connection, user_email: str, user_domain: str | None, query_text: str) -> int:
+    """Counts matching chunks in documents the user does NOT have access to."""
+    set_app_user_context(conn, user_email, user_domain)
+    # Documents accessible to user: visible via RLS
+    # Hidden documents: not visible via RLS. Since RLS filters documents, we can count chunks whose document_id is NOT in the RLS-filtered documents list.
+    row = fetch_one(
+        conn,
+        """
+        SELECT count(*) AS cnt
+          FROM chunks c
+         WHERE c.document_id NOT IN (SELECT id FROM documents)
+           AND c.tsv @@ plainto_tsquery('english', %(query_text)s)
+        """,
+        {"query_text": query_text},
+    )
+    return row["cnt"] if row else 0
+
+
+# ---- Collections & Collection Documents ----
+
+
+def create_collection(
+    conn: Connection, *, name: str, description: str | None = None, created_by: uuid.UUID | None = None
+) -> Row:
+    row = fetch_one(
+        conn,
+        """
+        INSERT INTO collections (name, description, created_by)
+        VALUES (%(name)s, %(description)s, %(created_by)s)
+        RETURNING *
+        """,
+        {"name": name, "description": description, "created_by": created_by},
+    )
+    if row is None:
+        raise RuntimeError("Failed to create collection")
+    return row
+
+
+def get_collection(conn: Connection, collection_id: uuid.UUID) -> Row | None:
+    return fetch_one(conn, "SELECT * FROM collections WHERE id = %(id)s", {"id": collection_id})
+
+
+def list_collections(conn: Connection) -> list[Row]:
+    return fetch_all(conn, "SELECT * FROM collections ORDER BY name ASC")
+
+
+def update_collection(conn: Connection, collection_id: uuid.UUID, *, name: str, description: str | None = None) -> Row:
+    row = fetch_one(
+        conn,
+        """
+        UPDATE collections
+           SET name = %(name)s, description = %(description)s, updated_at = now()
+         WHERE id = %(id)s
+        RETURNING *
+        """,
+        {"id": collection_id, "name": name, "description": description},
+    )
+    if row is None:
+        raise LookupError(f"Collection {collection_id} not found")
+    return row
+
+
+def delete_collection(conn: Connection, collection_id: uuid.UUID) -> None:
+    execute(conn, "DELETE FROM collections WHERE id = %(id)s", {"id": collection_id})
+
+
+def add_document_to_collection(conn: Connection, collection_id: uuid.UUID, document_id: uuid.UUID) -> None:
+    execute(
+        conn,
+        """
+        INSERT INTO collection_documents (collection_id, document_id)
+        VALUES (%(collection_id)s, %(document_id)s)
+        ON CONFLICT DO NOTHING
+        """,
+        {"collection_id": collection_id, "document_id": document_id},
+    )
+
+
+def remove_document_from_collection(conn: Connection, collection_id: uuid.UUID, document_id: uuid.UUID) -> None:
+    execute(
+        conn,
+        "DELETE FROM collection_documents WHERE collection_id = %(collection_id)s AND document_id = %(document_id)s",
+        {"collection_id": collection_id, "document_id": document_id},
+    )
+
+
+def list_collection_documents(conn: Connection, collection_id: uuid.UUID) -> list[Row]:
+    return fetch_all(
+        conn,
+        """
+        SELECT d.* FROM documents d
+        JOIN collection_documents cd ON d.id = cd.document_id
+        WHERE cd.collection_id = %(collection_id)s
+        ORDER BY d.created_at DESC
+        """,
+        {"collection_id": collection_id},
+    )
+
+
+# ---- Tags & Document Tags ----
+
+
+def get_or_create_tag(conn: Connection, name: str, category: str | None = None) -> Row:
+    row = fetch_one(
+        conn,
+        """
+        INSERT INTO tags (name, category)
+        VALUES (%(name)s, %(category)s)
+        ON CONFLICT (name) DO UPDATE
+           SET category = COALESCE(EXCLUDED.category, tags.category)
+        RETURNING *
+        """,
+        {"name": name, "category": category},
+    )
+    if row is None:
+        raise RuntimeError(f"Failed to get or create tag {name}")
+    return row
+
+
+def list_tags(conn: Connection) -> list[Row]:
+    return fetch_all(conn, "SELECT * FROM tags ORDER BY name ASC")
+
+
+def tag_document(conn: Connection, document_id: uuid.UUID, tag_id: uuid.UUID) -> None:
+    execute(
+        conn,
+        """
+        INSERT INTO document_tags (document_id, tag_id)
+        VALUES (%(document_id)s, %(tag_id)s)
+        ON CONFLICT DO NOTHING
+        """,
+        {"document_id": document_id, "tag_id": tag_id},
+    )
+
+
+def untag_document(conn: Connection, document_id: uuid.UUID, tag_id: uuid.UUID) -> None:
+    execute(
+        conn,
+        "DELETE FROM document_tags WHERE document_id = %(document_id)s AND tag_id = %(tag_id)s",
+        {"document_id": document_id, "tag_id": tag_id},
+    )
+
+
+def get_document_tags(conn: Connection, document_id: uuid.UUID) -> list[Row]:
+    return fetch_all(
+        conn,
+        """
+        SELECT t.* FROM tags t
+        JOIN document_tags dt ON t.id = dt.tag_id
+        WHERE dt.document_id = %(document_id)s
+        ORDER BY t.name ASC
+        """,
+        {"document_id": document_id},
+    )
+
+
+# ---- Conversations & Messages ----
+
+
+def create_conversation(conn: Connection, user_id: uuid.UUID, title: str | None = None) -> Row:
+    row = fetch_one(
+        conn,
+        """
+        INSERT INTO conversations (user_id, title)
+        VALUES (%(user_id)s, %(title)s)
+        RETURNING *
+        """,
+        {"user_id": user_id, "title": title},
+    )
+    if row is None:
+        raise RuntimeError("Failed to create conversation")
+    return row
+
+
+def get_conversation(conn: Connection, conversation_id: uuid.UUID, user_id: uuid.UUID) -> Row | None:
+    return fetch_one(
+        conn,
+        "SELECT * FROM conversations WHERE id = %(id)s AND user_id = %(user_id)s",
+        {"id": conversation_id, "user_id": user_id},
+    )
+
+
+def list_conversations_for_user(conn: Connection, user_id: uuid.UUID, limit: int = 50, offset: int = 0) -> list[Row]:
+    return fetch_all(
+        conn,
+        "SELECT * FROM conversations WHERE user_id = %(user_id)s ORDER BY updated_at DESC LIMIT %(limit)s OFFSET %(offset)s",
+        {"user_id": user_id, "limit": limit, "offset": offset},
+    )
+
+
+def update_conversation_title(conn: Connection, conversation_id: uuid.UUID, user_id: uuid.UUID, title: str) -> Row:
+    row = fetch_one(
+        conn,
+        """
+        UPDATE conversations
+           SET title = %(title)s, updated_at = now()
+         WHERE id = %(id)s AND user_id = %(user_id)s
+        RETURNING *
+        """,
+        {"id": conversation_id, "user_id": user_id, "title": title},
+    )
+    if row is None:
+        raise LookupError(f"Conversation {conversation_id} not found")
+    return row
+
+
+def delete_conversation(conn: Connection, conversation_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    execute(
+        conn,
+        "DELETE FROM conversations WHERE id = %(id)s AND user_id = %(user_id)s",
+        {"id": conversation_id, "user_id": user_id},
+    )
+
+
+def add_message(
+    conn: Connection,
+    *,
+    conversation_id: uuid.UUID,
+    role: str,
+    content: str,
+    sources_used: list[Any] | None = None,
+    tokens_used: int | None = None,
+) -> Row:
+    row = fetch_one(
+        conn,
+        """
+        INSERT INTO messages (conversation_id, role, content, sources_used, tokens_used)
+        VALUES (%(conversation_id)s, %(role)s, %(content)s, %(sources_used)s, %(tokens_used)s)
+        RETURNING *
+        """,
+        {
+            "conversation_id": conversation_id,
+            "role": role,
+            "content": content,
+            "sources_used": psycopg2.extras.Json(sources_used) if sources_used is not None else None,
+            "tokens_used": tokens_used,
+        },
+    )
+    if row is None:
+        raise RuntimeError("Failed to add message")
+    # Touch conversation updated_at
+    execute(conn, "UPDATE conversations SET updated_at = now() WHERE id = %(id)s", {"id": conversation_id})
+    return row
+
+
+def list_messages_for_conversation(conn: Connection, conversation_id: uuid.UUID) -> list[Row]:
+    return fetch_all(
+        conn,
+        "SELECT * FROM messages WHERE conversation_id = %(conversation_id)s ORDER BY created_at ASC",
+        {"conversation_id": conversation_id},
+    )
+
+
+# ---- Query Traces & Feedback ----
+
+
+def insert_query_trace(
+    conn: Connection,
+    *,
+    user_id: uuid.UUID | None = None,
+    conversation_id: uuid.UUID | None = None,
+    query_text: str,
+    retrieval_mode: str,
+    chunks_retrieved: list[Any] | None = None,
+    latency_ms: int | None = None,
+    llm_model: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    filters_applied: dict[str, Any] | None = None,
+) -> Row:
+    row = fetch_one(
+        conn,
+        """
+        INSERT INTO query_traces (user_id, conversation_id, query_text, retrieval_mode, chunks_retrieved, latency_ms, llm_model, prompt_tokens, completion_tokens, filters_applied)
+        VALUES (%(user_id)s, %(conversation_id)s, %(query_text)s, %(retrieval_mode)s, %(chunks_retrieved)s, %(latency_ms)s, %(llm_model)s, %(prompt_tokens)s, %(completion_tokens)s, %(filters_applied)s)
+        RETURNING *
+        """,
+        {
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "query_text": query_text,
+            "retrieval_mode": retrieval_mode,
+            "chunks_retrieved": psycopg2.extras.Json(chunks_retrieved) if chunks_retrieved is not None else None,
+            "latency_ms": latency_ms,
+            "llm_model": llm_model,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "filters_applied": psycopg2.extras.Json(filters_applied) if filters_applied is not None else None,
+        },
+    )
+    if row is None:
+        raise RuntimeError("Failed to insert query trace")
+    return row
+
+
+def insert_feedback(
+    conn: Connection,
+    *,
+    trace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    rating: int,
+    comment: str | None = None,
+) -> Row:
+    row = fetch_one(
+        conn,
+        """
+        INSERT INTO feedback (trace_id, user_id, rating, comment)
+        VALUES (%(trace_id)s, %(user_id)s, %(rating)s, %(comment)s)
+        RETURNING *
+        """,
+        {"trace_id": trace_id, "user_id": user_id, "rating": rating, "comment": comment},
+    )
+    if row is None:
+        raise RuntimeError("Failed to insert feedback")
+    return row
+
+
+# ---- Settings ----
+
+
+def get_setting(conn: Connection, key: str) -> Row | None:
+    return fetch_one(conn, "SELECT * FROM settings WHERE key = %(key)s", {"key": key})
+
+
+def set_setting(conn: Connection, key: str, value: Any, updated_by: uuid.UUID | None = None) -> Row:
+    row = fetch_one(
+        conn,
+        """
+        INSERT INTO settings (key, value, updated_by, updated_at)
+        VALUES (%(key)s, %(value)s::jsonb, %(updated_by)s, now())
+        ON CONFLICT (key) DO UPDATE
+           SET value = EXCLUDED.value,
+               updated_by = EXCLUDED.updated_by,
+               updated_at = now()
+        RETURNING *
+        """,
+        {
+            "key": key,
+            "value": psycopg2.extras.Json(value),
+            "updated_by": updated_by,
+        },
+    )
+    if row is None:
+        raise RuntimeError(f"Failed to set setting {key}")
+    return row
+
+
+def list_settings(conn: Connection) -> list[Row]:
+    return fetch_all(conn, "SELECT * FROM settings ORDER BY key ASC")

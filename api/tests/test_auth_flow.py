@@ -3,7 +3,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from amber.api.auth import safe_return_to
-from amber.models import DRIVE_FILE_SCOPE, drive_connected
+from amber.models import DRIVE_SCOPE, drive_connected
 from tests.conftest import BASE_URL, start
 
 
@@ -15,7 +15,7 @@ def test_start_redirects_to_google_with_pkce_and_drive_scope(client):
     assert params["access_type"] == "offline"
     assert params["prompt"] == "select_account"
     assert params["redirect_uri"] == f"{BASE_URL}/api/auth/google/callback"
-    assert set(params["scope"].split()) == {"openid", "email", "profile", DRIVE_FILE_SCOPE}
+    assert set(params["scope"].split()) == {"openid", "email", "profile", DRIVE_SCOPE}
     assert params["state"] and params["nonce"] and params["state"] != params["nonce"]
 
 
@@ -46,7 +46,12 @@ def test_return_to_rejects_open_redirects(target):
 
 @pytest.mark.parametrize(
     ("has_token", "scopes", "expected"),
-    [(True, f"openid {DRIVE_FILE_SCOPE}", True), (True, "openid", False), (False, f"openid {DRIVE_FILE_SCOPE}", False)],
+    [
+        (True, f"openid {DRIVE_SCOPE}", True),
+        (True, "openid https://www.googleapis.com/auth/drive.file", False),
+        (True, "openid", False),
+        (False, f"openid {DRIVE_SCOPE}", False),
+    ],
 )
 def test_drive_connected_needs_token_and_scope(has_token, scopes, expected):
     assert drive_connected(has_token, scopes) is expected

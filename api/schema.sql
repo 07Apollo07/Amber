@@ -59,6 +59,177 @@ CREATE TABLE IF NOT EXISTS revoked_sessions (
 );
 CREATE INDEX IF NOT EXISTS ix_revoked_sessions_expires_at ON revoked_sessions (expires_at);
 
+-- Phase 3: Documents, Access Control, Chunks, Search, Conversations, Traces & Settings.
+
+CREATE TABLE IF NOT EXISTS documents (
+    id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_id         uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    origin           varchar(32) NOT NULL,
+    drive_file_id    varchar(255),
+    title            varchar(512) NOT NULL,
+    file_type        varchar(64) NOT NULL,
+    file_size_bytes  bigint,
+    mime_type        varchar(255),
+    sha256           varchar(64),
+    status           varchar(32) NOT NULL DEFAULT 'queued',
+    status_message   text,
+    sharing_option   varchar(32) NOT NULL DEFAULT 'private',
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    updated_at       timestamptz NOT NULL DEFAULT now(),
+    last_synced_at   timestamptz,
+    CONSTRAINT ck_documents_origin CHECK (origin IN ('desktop_upload', 'drive_sync')),
+    CONSTRAINT ck_documents_status CHECK (status IN ('queued', 'saving_to_drive', 'parsing', 'indexing', 'indexed', 'failed')),
+    CONSTRAINT ck_documents_sharing CHECK (sharing_option IN ('private', 'specific_people', 'domain'))
+);
+CREATE INDEX IF NOT EXISTS ix_documents_owner_id ON documents (owner_id);
+CREATE INDEX IF NOT EXISTS ix_documents_drive_file_id ON documents (drive_file_id);
+CREATE INDEX IF NOT EXISTS ix_documents_status ON documents (status);
+CREATE INDEX IF NOT EXISTS ix_documents_sha256 ON documents (sha256);
+
+CREATE TABLE IF NOT EXISTS document_access (
+    id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    document_id      uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    principal_type   varchar(16) NOT NULL,
+    principal_value  varchar(320) NOT NULL,
+    origin           varchar(16) NOT NULL DEFAULT 'manual',
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT uq_document_access_principal UNIQUE (document_id, principal_type, principal_value),
+    CONSTRAINT ck_document_access_principal_type CHECK (principal_type IN ('user', 'domain')),
+    CONSTRAINT ck_document_access_origin CHECK (origin IN ('manual', 'drive_sync'))
+);
+CREATE INDEX IF NOT EXISTS ix_document_access_lookup ON document_access (principal_type, principal_value);
+CREATE INDEX IF NOT EXISTS ix_document_access_document_id ON document_access (document_id);
+
+CREATE TABLE IF NOT EXISTS chunks (
+    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id  uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    ord          integer NOT NULL,
+    text         text NOT NULL,
+    page         integer,
+    embedding    vector(1536),
+    tsv          tsvector GENERATED ALWAYS AS (to_tsvector('english', text)) STORED,
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_chunks_document_id ON chunks (document_id);
+CREATE INDEX IF NOT EXISTS ix_chunks_embedding ON chunks USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS ix_chunks_tsv ON chunks USING gin (tsv);
+
+CREATE TABLE IF NOT EXISTS collections (
+    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_id     uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    name         varchar(255) NOT NULL,
+    description  text,
+    color        varchar(32),
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_collections_owner_id ON collections (owner_id);
+
+CREATE TABLE IF NOT EXISTS collection_documents (
+    collection_id  uuid NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
+    document_id    uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (collection_id, document_id)
+);
+CREATE INDEX IF NOT EXISTS ix_collection_documents_doc ON collection_documents (document_id);
+
+CREATE TABLE IF NOT EXISTS tags (
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        varchar(64) NOT NULL UNIQUE,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS document_tags (
+    document_id  uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    tag_id       uuid NOT NULL REFERENCES tags (id) ON DELETE CASCADE,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (document_id, tag_id)
+);
+
+CREATE TABLE IF NOT EXISTS query_traces (
+    id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id              uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    query                text NOT NULL,
+    rewritten_query      text,
+    filters              jsonb,
+    retrieved_chunk_ids  jsonb,
+    cited_chunk_ids      jsonb,
+    hidden_count         integer NOT NULL DEFAULT 0,
+    model                varchar(128),
+    tokens               integer,
+    latency_ms           integer,
+    created_at           timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_query_traces_user_id ON query_traces (user_id);
+CREATE INDEX IF NOT EXISTS ix_query_traces_created_at ON query_traces (created_at);
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    title       varchar(255) NOT NULL DEFAULT 'New Conversation',
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_conversations_user_id ON conversations (user_id);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id  uuid NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+    role             varchar(16) NOT NULL,
+    content          text NOT NULL,
+    trace_id         uuid REFERENCES query_traces (id) ON DELETE SET NULL,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT ck_messages_role CHECK (role IN ('user', 'assistant', 'system'))
+);
+CREATE INDEX IF NOT EXISTS ix_messages_conversation_id ON messages (conversation_id);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    message_id  uuid REFERENCES messages (id) ON DELETE CASCADE,
+    trace_id    uuid REFERENCES query_traces (id) ON DELETE CASCADE,
+    rating      varchar(16) NOT NULL,
+    comment     text,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT ck_feedback_rating CHECK (rating IN ('thumbs_up', 'thumbs_down'))
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key         varchar(128) PRIMARY KEY,
+    value       jsonb NOT NULL,
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Row-Level Security
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE document_access ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS documents_access_policy ON documents;
+CREATE POLICY documents_access_policy ON documents
+  FOR ALL
+  USING (
+    owner_id IN (SELECT id FROM users WHERE email = NULLIF(current_setting('app.user_email', true), ''))
+    OR EXISTS (
+      SELECT 1 FROM document_access da
+      WHERE da.document_id = documents.id
+        AND (
+          (da.principal_type = 'user' AND da.principal_value = NULLIF(current_setting('app.user_email', true), ''))
+          OR (da.principal_type = 'domain' AND da.principal_value = NULLIF(current_setting('app.user_domain', true), ''))
+        )
+    )
+  );
+
+DROP POLICY IF EXISTS chunks_access_policy ON chunks;
+CREATE POLICY chunks_access_policy ON chunks
+  FOR ALL
+  USING (
+    EXISTS (
+      SELECT 1 FROM documents d
+      WHERE d.id = chunks.document_id
+    )
+  );
+
 -- Least privilege for the API role, once the infra setup has created it.
 DO $$
 BEGIN
@@ -67,6 +238,19 @@ BEGIN
     GRANT SELECT, INSERT, UPDATE, DELETE ON oauth_tokens TO amber_app;
     GRANT INSERT ON audit_log TO amber_app;  -- append-only: no SELECT, UPDATE or DELETE
     GRANT SELECT, INSERT, DELETE ON revoked_sessions TO amber_app;
+
+    GRANT SELECT, INSERT, UPDATE, DELETE ON documents TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON document_access TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON chunks TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON collections TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON collection_documents TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON tags TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON document_tags TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON conversations TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON messages TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON query_traces TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON feedback TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON settings TO amber_app;
   END IF;
 END $$;
 

@@ -12,8 +12,8 @@ export const metadata: Metadata = { title: "Sign in" }
 const permissions = [
   {
     icon: FileSearch,
-    title: "Read files you choose",
-    body: "Only the Drive files you pick in Amber, never your whole Drive.",
+    title: "Browse and read Drive files",
+    body: "Browse your Google Drive files to select and index them in Amber.",
   },
   {
     icon: FolderUp,
@@ -90,7 +90,7 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
         </div>
 
         <p className="mt-6 text-center text-xs text-muted-foreground">
-          Amber requests the <code className="rounded bg-muted px-1 py-0.5">drive.file</code> scope only. You can
+          Amber requests the <code className="rounded bg-muted px-1 py-0.5">drive.readonly</code> scope. You can
           disconnect Drive anytime from your profile.
         </p>
       </div>

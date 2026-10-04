@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     firebase_project_id: str = ""
     firebase_web_api_key: SecretStr = SecretStr("")
 
+    # Gemini API Key for LLM and embeddings
+    gemini_api_key: SecretStr = SecretStr("")
+
     # Google service-account key file used by google.auth.default() (Firebase Admin, KMS).
     # Read from GOOGLE_APPLICATION_CREDENTIALS (no AMBER_ prefix), in the environment or .env.
     # A relative path is resolved against the api folder. Unset: use the ambient credentials
@@ -60,7 +63,7 @@ class Settings(BaseSettings):
     # Signing out everywhere takes effect on other instances within this window.
     revocation_cache_seconds: int = 60
 
-    cookie_secure: bool = True
+    cookie_secure: bool | None = None
     session_days: int = 5
     bootstrap_admin_emails: str = ""  # comma-separated
 
@@ -83,6 +86,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check(self) -> "Settings":
+        if self.cookie_secure is None:
+            self.cookie_secure = self.public_base_url.startswith("https://")
         self.trusted_networks  # noqa: B018 (fail fast on a malformed CIDR)
         if self.env != "test":
             # Fail at startup, not at the first sign-in.

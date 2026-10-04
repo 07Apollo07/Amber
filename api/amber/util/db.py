@@ -36,6 +36,13 @@ def fetch_one(conn: Connection, sql: str, params: dict[str, Any] | None = None) 
         return dict(row) if row is not None else None
 
 
+def fetch_all(conn: Connection, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        return [dict(r) for r in rows] if rows is not None else []
+
+
 def execute(conn: Connection, sql: str, params: dict[str, Any] | None = None) -> int:
     """Runs a statement and returns the number of affected rows."""
     with conn.cursor() as cur:

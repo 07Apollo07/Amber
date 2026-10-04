@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 
-from amber.api import auth, me
+from amber.api import auth, documents, drive, me
 from amber.util.config import Settings, get_settings
 from amber.util.firebase import init_firebase
 from amber.util.ratelimit import RateLimited, rate_limited_response
@@ -47,20 +47,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(auth.router)
     app.include_router(me.router)
+    app.include_router(documents.router)
+    app.include_router(drive.router)
     return app
 
 
 def run() -> None:
     """Starts the API server. Auto-reloads on code changes in dev."""
+    import os
+
     import uvicorn
 
     settings = get_settings()
+    api_dir = os.path.dirname(os.path.abspath(__file__))
     uvicorn.run(
         "main:create_app",
         factory=True,
         host=settings.host,
         port=settings.port,
         reload=settings.env == "dev",
+        reload_dirs=[api_dir] if settings.env == "dev" else None,
         # The client IP is resolved by amber/util/net.py from AMBER_TRUSTED_PROXIES only.
         proxy_headers=False,
     )

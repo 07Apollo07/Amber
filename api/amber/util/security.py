@@ -38,7 +38,8 @@ def get_app_settings(request: Request) -> Settings:
 
 def get_db(request: Request) -> Generator[Connection, None, None]:
     """One connection per request; uncommitted work is discarded when it closes."""
-    with db.connect(request.app.state.settings) as conn:
+    settings = request.app.state.settings
+    with db.connect(settings) as conn:
         yield conn
 
 
@@ -101,7 +102,7 @@ def session_hash(cookie: str) -> bytes:
     return hashlib.sha256(cookie.encode()).digest()
 
 
-def verified_session(request: Request, settings: Settings, conn: Connection) -> tuple[str, dict]:
+def verified_session(request: Request, settings: Settings, conn: Connection | None = None) -> tuple[str, dict]:
     """Returns (cookie, claims) for a valid, unrevoked session cookie, or raises 401."""
     session_name, _, _ = cookie_names(settings)
     cookie = request.cookies.get(session_name)
@@ -111,19 +112,31 @@ def verified_session(request: Request, settings: Settings, conn: Connection) -> 
         claims = firebase.verify_session_cookie(settings, cookie)  # signature, expiry, revoke-all
     except SessionInvalid:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired") from None
-    if repository.is_session_revoked(conn, session_hash(cookie)):  # signed out on this device
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired")
+    
+    if conn is not None:
+        if repository.is_session_revoked(conn, session_hash(cookie)):  # signed out on this device
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired")
+    else:
+        with db.connect(settings) as c:
+            if repository.is_session_revoked(c, session_hash(cookie)):
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expired")
     return cookie, claims
 
 
-def current_user(request: Request, settings: SettingsDep, conn: DbDep) -> dict[str, Any]:
-    _, claims = verified_session(request, settings, conn)
-    user = repository.get_user_by_firebase_uid(conn, claims["uid"])
-    if user is None:
+def current_user(request: Request, settings: SettingsDep) -> dict[str, Any]:
+    session_name, _, _ = cookie_names(settings)
+    cookie = request.cookies.get(session_name)
+    if not cookie:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in")
-    if user["status"] != "active":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Account deactivated")
-    return user
+
+    with db.connect(settings) as conn:
+        _, claims = verified_session(request, settings, conn)
+        user = repository.get_user_by_firebase_uid(conn, claims["uid"])
+        if user is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in")
+        if user["status"] != "active":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Account deactivated")
+        return user
 
 
 CurrentUser = Annotated[dict[str, Any], Depends(current_user)]

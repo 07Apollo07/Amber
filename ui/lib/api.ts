@@ -27,3 +27,18 @@ export async function apiPost(path: string, body?: unknown): Promise<Response> {
   }
   return res
 }
+
+export async function apiDelete(path: string): Promise<Response> {
+  const res = await fetch(path, {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: {
+      "X-Amber-CSRF": readCsrfToken(),
+    },
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null)
+    throw new Error(detail?.detail ?? `Request failed (${res.status})`)
+  }
+  return res
+}
