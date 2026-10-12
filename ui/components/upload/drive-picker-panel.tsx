@@ -119,9 +119,18 @@ export function DrivePickerPanel({ onImported }: { onImported: () => void }) {
     setImporting(true)
     try {
       const res = await apiPost("/api/drive/import", { file_ids })
-      const data = (await res.json()) as { imported: unknown[]; skipped?: string[] }
+      const data = (await res.json()) as {
+        imported: unknown[]
+        skipped?: string[]
+        failed?: { title: string; error: string }[]
+      }
       if (data.imported.length > 0) {
         toast.success(`Imported ${data.imported.length} ${data.imported.length === 1 ? "file" : "files"}`)
+      }
+      if (data.failed?.length) {
+        toast.error(`${data.failed.length} ${data.failed.length === 1 ? "file" : "files"} couldn't be imported`, {
+          description: "Open the file in Manage Files to see the full error.",
+        })
       }
       if (data.skipped?.length) {
         toast.warning(`Skipped ${data.skipped.length} unsupported ${data.skipped.length === 1 ? "file" : "files"}`, {

@@ -123,3 +123,20 @@ def test_drive_sync_reports_permission_errors_in_plain_words():
 
     with pytest.raises(DriveSharingError, match="Sign in again"):
         sync_file_sharing(Denied([]), "f1", emails=set(), domain=None)
+
+
+def test_serialize_includes_file_details():
+    from datetime import UTC, datetime
+
+    from amber.api.documents import _serialize
+
+    now = datetime(2026, 10, 12, tzinfo=UTC)
+    row = {
+        "id": "1", "title": "t", "file_type": "pdf", "origin": "desktop_upload", "status": "failed",
+        "status_message": "Failed while generating embeddings: boom", "file_size_bytes": None, "created_at": now,
+        "updated_at": now, "last_synced_at": None, "drive_file_id": None, "tags": [], "collection": None,
+        "chunk_count": 0, "owner_name": "Me", "owner_email": "me@acme.com", "access": [],
+    }
+    out = _serialize(row, "me@acme.com")
+    assert out["chunk_count"] == 0 and out["owner"] == {"name": "Me", "email": "me@acme.com"}
+    assert out["status_message"].startswith("Failed while") and out["updated_at"].startswith("2026-10-12")

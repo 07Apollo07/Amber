@@ -63,6 +63,11 @@ def _serialize(row: dict[str, Any], owner_email: str) -> dict[str, Any]:
         "status_message": row["status_message"],
         "file_size_bytes": row["file_size_bytes"] or 0,
         "created_at": row["created_at"].isoformat(),
+        "updated_at": row["updated_at"].isoformat(),
+        "last_synced_at": row["last_synced_at"].isoformat() if row.get("last_synced_at") else None,
+        "chunk_count": int(row.get("chunk_count") or 0),
+        "owner": {"name": row.get("owner_name"), "email": row.get("owner_email")},
+        "is_owner": bool(row.get("is_owner", True)),
         "drive_url": f"https://drive.google.com/file/d/{row['drive_file_id']}/view" if row["drive_file_id"] else None,
         "tags": list(row.get("tags") or []),
         "collection": row.get("collection"),
@@ -108,14 +113,34 @@ def apply_access(conn: Any, document_id: uuid.UUID, access: tuple[str, list[dict
 
 @router.get("/mine")
 def list_my_documents(user: CurrentUser, conn: DbDep) -> dict[str, Any]:
-    """Everything the user owns, with tags, collection and sharing, plus the names they can pick from."""
+    """Everything the user owns or has been given access to, plus the collection and tag names they can pick from."""
     repository.set_app_user_context(conn, user["email"], user["domain"])
-    rows = repository.list_owned_documents(conn, user["id"])
+    rows = repository.list_accessible_documents(
+        conn, user_id=user["id"], user_email=user["email"], user_domain=user["domain"]
+    )
     return {
-        "documents": [_serialize(r, user["email"]) for r in rows],
+        "documents": [_serialize(r, r.get("owner_email") or user["email"]) for r in rows],
         "collections": [{"id": str(c["id"]), "name": c["name"]} for c in repository.list_collections(conn, user["id"])],
         "tags": repository.list_tag_names(conn, user["id"]),
     }
+
+
+@router.get("/{document_id}/details")
+def document_details(user: CurrentUser, conn: DbDep, document_id: uuid.UUID) -> dict[str, Any]:
+    """Details that need Google Drive: who owns the file there. `drive_owner` is null when Drive can't say."""
+    doc = _require_owned(conn, user, document_id)
+    drive_owner = None
+    if doc["drive_file_id"]:
+        drive_service = drive.build_drive_service(user["id"], conn)
+        if drive_service is not None:
+            try:
+                meta = drive_service.files().get(fileId=doc["drive_file_id"], fields="owners(displayName, emailAddress)").execute()
+                owner = (meta.get("owners") or [None])[0]
+                if owner:
+                    drive_owner = {"name": owner.get("displayName"), "email": owner.get("emailAddress")}
+            except Exception:
+                drive_owner = None  # deleted, no access, or Drive is unavailable: the page falls back to the Amber owner
+    return {"drive_owner": drive_owner}
 
 
 def _require_owned(conn: Any, user: dict[str, Any], document_id: uuid.UUID) -> dict[str, Any]:

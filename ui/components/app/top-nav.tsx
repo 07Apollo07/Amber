@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils"
 
 const links = [
   { href: "/search", label: "Search", icon: Search, adminOnly: false },
-  { href: "/upload", label: "Upload", icon: Upload, adminOnly: false },
+  { href: "/upload", label: "Data", icon: Upload, adminOnly: false },
   { href: "/admin", label: "Admin", icon: Shield, adminOnly: true },
 ]
 

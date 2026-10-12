@@ -253,7 +253,7 @@ function MyDocuments() {
             description="Upload files or pick them from Google Drive to search them with Amber."
             action={
               <Button asChild variant="outline">
-                <Link href="/upload">Go to Upload</Link>
+                <Link href="/upload">Go to Data</Link>
               </Button>
             }
           />

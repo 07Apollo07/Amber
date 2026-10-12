@@ -900,28 +900,41 @@ def list_settings(conn: Connection) -> list[Row]:
 # ---- Upload page: owned documents with their tags, collection and sharing ----
 
 
-def list_owned_documents(conn: Connection, owner_id: uuid.UUID, limit: int = 200) -> list[Row]:
-    """The user's own documents, newest first, each with `tags` (names), `collection` (name or None)
-    and `access` (the user/domain grants that are not the owner's own email)."""
+def list_accessible_documents(
+    conn: Connection, *, user_id: uuid.UUID, user_email: str, user_domain: str | None, limit: int = 200
+) -> list[Row]:
+    """Every document the user owns or has been granted (by email or domain), newest first, each with `tags`
+    (names), `collection` (the user's own collection holding it, or None), `is_owner` and `access` (the
+    user/domain grants). Access is checked explicitly because row-level security is skipped for table owners."""
     return fetch_all(
         conn,
         """
         SELECT d.*,
+               (d.owner_id = %(user_id)s) AS is_owner,
+               (SELECT count(*) FROM chunks ch WHERE ch.document_id = d.id) AS chunk_count,
+               (SELECT u.name FROM users u WHERE u.id = d.owner_id) AS owner_name,
+               (SELECT u.email FROM users u WHERE u.id = d.owner_id) AS owner_email,
                COALESCE((SELECT array_agg(t.name ORDER BY t.name)
                            FROM document_tags dt JOIN tags t ON t.id = dt.tag_id
                           WHERE dt.document_id = d.id), '{}') AS tags,
                (SELECT c.id FROM collection_documents cd JOIN collections c ON c.id = cd.collection_id
-                 WHERE cd.document_id = d.id AND c.owner_id = d.owner_id LIMIT 1) AS collection_id,
+                 WHERE cd.document_id = d.id AND c.owner_id = %(user_id)s LIMIT 1) AS collection_id,
                (SELECT c.name FROM collection_documents cd JOIN collections c ON c.id = cd.collection_id
-                 WHERE cd.document_id = d.id AND c.owner_id = d.owner_id LIMIT 1) AS collection,
+                 WHERE cd.document_id = d.id AND c.owner_id = %(user_id)s LIMIT 1) AS collection,
                COALESCE((SELECT json_agg(json_build_object('type', da.principal_type, 'value', da.principal_value))
                            FROM document_access da WHERE da.document_id = d.id), '[]') AS access
           FROM documents d
-         WHERE d.owner_id = %(owner_id)s
+         WHERE d.owner_id = %(user_id)s
+            OR EXISTS (
+                 SELECT 1 FROM document_access da
+                  WHERE da.document_id = d.id
+                    AND ((da.principal_type = 'user' AND da.principal_value = %(email)s)
+                      OR (da.principal_type = 'domain' AND %(domain)s <> '' AND da.principal_value = %(domain)s))
+               )
          ORDER BY d.created_at DESC
          LIMIT %(limit)s
         """,
-        {"owner_id": owner_id, "limit": limit},
+        {"user_id": user_id, "email": user_email.lower(), "domain": (user_domain or "").lower(), "limit": limit},
     )
 
 

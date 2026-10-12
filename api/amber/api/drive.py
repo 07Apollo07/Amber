@@ -1,5 +1,6 @@
 """Google Drive API router: importing files from Drive Picker and syncing changes."""
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -7,8 +8,11 @@ from pydantic import BaseModel
 
 from amber import repository
 from amber.api.documents import apply_organization
+from amber.ingest.pipeline import IndexingError, index_document_content, mark_document_failed
 from amber.util import drive
 from amber.util.security import CsrfProtected, CurrentUser, DbDep
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/drive", tags=["drive"])
 
@@ -95,7 +99,9 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
 
     imported = []
     skipped: list[str] = []
+    failed: list[dict[str, str]] = []
     for file_id in req.file_ids:
+        title = file_id
         doc_id = None  # so a failure here never marks the previous file's document as failed
         try:
             # Get file metadata
@@ -164,42 +170,29 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
                 ],
             )
 
-            from amber.ingest.chunker import chunk_document_blocks
-            from amber.ingest.embedder import generate_embeddings
-            from amber.ingest.parser import parse_document
-
-            blocks = parse_document(file_bytes, mime_type, parse_name)
-            chunks_data = chunk_document_blocks(blocks)
-            texts = [c["content"] for c in chunks_data]
-            embeddings = generate_embeddings(texts)
-
-            repository.delete_chunks_for_document(conn, doc_id)
-            for idx, chunk in enumerate(chunks_data):
-                emb = embeddings[idx] if idx < len(embeddings) else None
-                repository.insert_chunk(
-                    conn,
-                    document_id=doc_id,
-                    ord=idx,
-                    text=chunk["content"],
-                    page=chunk.get("metadata", {}).get("page"),
-                    embedding=emb,
-                )
+            conn.commit()  # keep the document even if indexing fails below, so its error can be shown
+            index_document_content(conn, doc_id, file_bytes, mime_type, parse_name)
 
             # Mark as successfully indexed
             repository.update_document_status(conn, doc_id, "indexed")
+            conn.commit()
 
             apply_organization(conn, user, doc_id, collection=req.collection, tags=req.tags)
 
             imported.append({"document_id": str(doc_id), "file_id": file_id, "title": title})
         except Exception as exc:
-            # Log error per file and mark as failed in db if doc_id was created
-            print(f"Error importing Drive file {file_id}: {exc}")
+            # One bad file shouldn't stop the rest. Keep it, flagged failed with the reason, when it got far enough
+            # to have a document row; otherwise it only appears in the response.
+            message = str(exc) if isinstance(exc, IndexingError) else f"Failed while importing from Google Drive: {type(exc).__name__}: {exc}"
+            log.warning("Importing Drive file %s failed: %s", file_id, message)
             if doc_id:
                 try:
-                    repository.update_document_status(conn, doc_id, "failed", status_message=str(exc))
+                    mark_document_failed(conn, doc_id, message)
                 except Exception:
-                    pass
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+                    conn.rollback()
+            else:
+                conn.rollback()
+            failed.append({"title": title, "error": message})
 
     repository.insert_audit(
         conn,
@@ -207,8 +200,8 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
         actor_email=user["email"],
         action="import_drive_files",
         target=str(req.file_ids),
-        detail={"imported_count": len(imported)},
+        detail={"imported_count": len(imported), "failed_count": len(failed)},
         ip=None,
     )
     conn.commit()
-    return {"success": True, "imported": imported, "skipped": skipped}
+    return {"success": True, "imported": imported, "skipped": skipped, "failed": failed}

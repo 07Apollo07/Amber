@@ -1,12 +1,15 @@
 "use client"
 
-import { Building2, ExternalLink, Lock, Settings2, UsersRound, X } from "lucide-react"
+import { useState } from "react"
+import { Building2, ChevronRight, ExternalLink, Lock, Settings2, UsersRound, X } from "lucide-react"
 
 import { StatusBadge } from "@/components/app/status-badge"
 import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Progress } from "@/components/ui/progress"
 import { formatBytes } from "@/lib/format"
 import type { Sharing, UploadRow } from "@/lib/types"
+import { cn } from "@/lib/utils"
 
 export function sharingLabel(sharing: Sharing) {
   if (sharing.kind === "domain") return { icon: Building2, text: `Everyone at @${sharing.domain}` }
@@ -17,7 +20,14 @@ export function sharingLabel(sharing: Sharing) {
   return { icon: Lock, text: "Only you" }
 }
 
-/** One document in the Manage Files list. Uploads that haven't reached the server show progress instead of Manage. */
+type Person = { name: string | null; email: string | null }
+
+function personLabel(p: Person) {
+  if (p.name && p.email) return `${p.name} (${p.email})`
+  return p.name ?? p.email ?? "Unknown"
+}
+
+/** One document in Manage Files. Saved documents expand to show owner, sharing, last update and indexing details. */
 export function FileRow({
   row,
   onRemove,
@@ -27,17 +37,42 @@ export function FileRow({
   onRemove: (id: string) => void
   onManage: (row: UploadRow) => void
 }) {
+  const [open, setOpen] = useState(false)
+  // The file's owner in Google Drive, looked up the first time the details are opened.
+  const [driveOwner, setDriveOwner] = useState<Person | null | undefined>(undefined)
   const inProgress = row.status !== "ready" && row.status !== "failed"
   const { icon: ShareIcon, text } = sharingLabel(row.sharing)
-  return (
-    <li className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center">
+
+  function toggle(next: boolean) {
+    setOpen(next)
+    if (next && driveOwner === undefined && row.driveUrl && row.isOwner) {
+      setDriveOwner(null) // marks the lookup as started
+      fetch(`/api/documents/${row.id}/details`, { credentials: "same-origin" })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: { drive_owner: Person | null } | null) => setDriveOwner(data?.drive_owner ?? null))
+        .catch(() => setDriveOwner(null))
+    }
+  }
+
+  const header = (
+    <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
+          {row.saved && (
+            <CollapsibleTrigger
+              className="-ml-1 shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+              aria-label={open ? `Hide details for ${row.name}` : `Show details for ${row.name}`}
+            >
+              <ChevronRight className={cn("size-4 transition-transform", open && "rotate-90")} />
+            </CollapsibleTrigger>
+          )}
           <span className="truncate text-sm font-medium">{row.name}</span>
           <span className="shrink-0 text-xs text-muted-foreground">{formatBytes(row.sizeBytes)}</span>
         </div>
-        {row.error ? (
-          <p className="mt-1 text-xs text-destructive">{row.error}</p>
+        {row.error && !row.saved ? (
+          <p className="mt-1 text-xs break-words text-destructive">{row.error}</p>
+        ) : row.error ? (
+          <p className="mt-1 line-clamp-1 text-xs text-destructive">{row.error}</p>
         ) : inProgress ? (
           <Progress value={row.progress} className="mt-2 h-1.5" aria-label={`${row.name} progress`} />
         ) : null}
@@ -63,7 +98,7 @@ export function FileRow({
             </a>
           </Button>
         )}
-        {row.saved && (
+        {row.saved && row.isOwner && (
           <Button variant="outline" size="sm" onClick={() => onManage(row)}>
             <Settings2 /> Manage
           </Button>
@@ -74,6 +109,68 @@ export function FileRow({
           </Button>
         )}
       </div>
+    </div>
+  )
+
+  if (!row.saved) return <li>{header}</li>
+
+  const owner: Person = driveOwner ?? row.owner
+  const people = row.sharing.kind === "people" ? row.sharing.emails : []
+  const updated = new Date(row.updatedAt)
+
+  return (
+    <li>
+      <Collapsible open={open} onOpenChange={toggle}>
+        {header}
+        <CollapsibleContent>
+          <dl className="grid gap-x-6 gap-y-3 border-t bg-muted/20 px-4 py-3 text-sm sm:grid-cols-2">
+            <Detail label="Shared with">
+              {row.sharing.kind === "domain" ? (
+                `Everyone at @${row.sharing.domain}`
+              ) : people.length > 0 ? (
+                <>
+                  {people.length} {people.length === 1 ? "person" : "people"}
+                  <span className="mt-0.5 block text-xs break-all text-muted-foreground">{people.join(", ")}</span>
+                </>
+              ) : (
+                "Only the owner (0 people)"
+              )}
+            </Detail>
+            <Detail label={driveOwner ? "Owner in Google Drive" : "Owner"}>
+              {personLabel(owner)}
+            </Detail>
+            <Detail label="Last updated">
+              {Number.isNaN(updated.getTime())
+                ? "Unknown"
+                : updated.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}
+            </Detail>
+            <Detail label="Vector store">
+              {row.status === "failed" ? (
+                <span className="text-destructive">Not added</span>
+              ) : inProgress ? (
+                "Being added…"
+              ) : (
+                `${row.chunkCount} ${row.chunkCount === 1 ? "chunk" : "chunks"} added`
+              )}
+            </Detail>
+          </dl>
+          {row.status === "failed" && (
+            <div className="border-t border-destructive/25 bg-destructive/5 px-4 py-3" role="alert">
+              <p className="text-xs font-medium text-destructive">Why it failed</p>
+              <p className="mt-1 text-sm break-words whitespace-pre-wrap">{row.error ?? "No error details were recorded."}</p>
+            </div>
+          )}
+        </CollapsibleContent>
+      </Collapsible>
     </li>
+  )
+}
+
+function Detail({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="mt-0.5">{children}</dd>
+    </div>
   )
 }

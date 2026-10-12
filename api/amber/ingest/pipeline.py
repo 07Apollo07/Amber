@@ -12,6 +12,50 @@ from amber.util import db, drive
 from amber.util.config import get_settings
 
 
+class IndexingError(Exception):
+    """Indexing a document failed. The message says which step and why, and is stored on the document."""
+
+
+def index_document_content(conn: Any, doc_id: uuid.UUID, file_bytes: bytes, mime_type: str, filename: str) -> int:
+    """Parses, chunks, embeds and stores the document's text. Returns the number of chunks stored."""
+    stage = "reading the file"
+    try:
+        blocks = parse_document(file_bytes, mime_type, filename)
+        stage = "splitting the text into chunks"
+        chunks_data = chunk_document_blocks(blocks)
+        if not chunks_data:
+            raise IndexingError(
+                "No readable text was found in this file. It may be a scan or image-only document, or it may be empty."
+            )
+        stage = "generating embeddings"
+        embeddings = generate_embeddings([c["content"] for c in chunks_data])
+        stage = "saving the chunks to the database"
+        repository.delete_chunks_for_document(conn, doc_id)
+        for idx, chunk in enumerate(chunks_data):
+            emb = embeddings[idx] if idx < len(embeddings) else None
+            repository.insert_chunk(
+                conn,
+                document_id=doc_id,
+                ord=idx,
+                text=chunk["content"],
+                page=chunk.get("metadata", {}).get("page"),
+                embedding=emb,
+            )
+    except IndexingError:
+        raise
+    except Exception as exc:
+        raise IndexingError(f"Failed while {stage}: {type(exc).__name__}: {exc}") from exc
+    return len(chunks_data)
+
+
+def mark_document_failed(conn: Any, doc_id: uuid.UUID, message: str) -> None:
+    """Discards the half-finished work and keeps the document, flagged failed, so the user can see why."""
+    conn.rollback()
+    repository.delete_chunks_for_document(conn, doc_id)
+    repository.update_document_status(conn, doc_id, "failed", status_message=message[:2000])
+    conn.commit()
+
+
 def process_document_upload(
     user_id: uuid.UUID,
     file_bytes: bytes,
@@ -61,7 +105,7 @@ def process_document_upload(
             file_size_bytes=size_bytes,
             mime_type=mime_type,
             sha256=checksum,
-            status="indexed",
+            status="indexing",
             sharing_option="private",
         )
         doc_id = doc_row["id"]
@@ -84,33 +128,19 @@ def process_document_upload(
 
         repository.set_document_access(conn, doc_id, formatted_grants)
 
-        # 3. Parse document into blocks
-        blocks = parse_document(file_bytes, mime_type, filename)
+        conn.commit()  # keep the document even if indexing fails below, so its error can be shown
 
-        # 4. Chunk blocks
-        chunks_data = chunk_document_blocks(blocks)
-
-        # 5. Generate embeddings in batches
-        texts = [c["content"] for c in chunks_data]
-        embeddings = generate_embeddings(texts)
-
-        # 6. Delete existing chunks and insert new ones
-        repository.delete_chunks_for_document(conn, doc_id)
-        for idx, chunk in enumerate(chunks_data):
-            emb = embeddings[idx] if idx < len(embeddings) else None
-            repository.insert_chunk(
-                conn,
-                document_id=doc_id,
-                ord=idx,
-                text=chunk["content"],
-                page=chunk.get("metadata", {}).get("page"),
-                embedding=emb,
-            )
-
+        # 3-6. Parse, chunk, embed and store
+        try:
+            chunks_count = index_document_content(conn, doc_id, file_bytes, mime_type, filename)
+        except IndexingError as exc:
+            mark_document_failed(conn, doc_id, str(exc))
+            raise
+        repository.update_document_status(conn, doc_id, "indexed")
         conn.commit()
         return {
             "document_id": str(doc_id),
             "title": filename,
-            "chunks_count": len(chunks_data),
+            "chunks_count": chunks_count,
             "drive_file_id": drive_file_id,
         }

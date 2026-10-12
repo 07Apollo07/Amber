@@ -28,6 +28,10 @@ type ApiDocument = {
   collection: string | null
   collection_id: string | null
   sharing: Sharing
+  updated_at: string
+  chunk_count: number
+  owner: { name: string | null; email: string | null }
+  is_owner: boolean
 }
 
 const STATUS: Record<string, IngestionStatus> = {
@@ -60,6 +64,10 @@ function toRow(doc: ApiDocument): UploadRow {
     collection: doc.collection,
     collectionId: doc.collection_id,
     sharing: doc.sharing,
+    updatedAt: doc.updated_at,
+    chunkCount: doc.chunk_count,
+    owner: doc.owner,
+    isOwner: doc.is_owner,
   }
 }
 
@@ -129,6 +137,10 @@ export function UploadPage() {
             collection: null,
             collectionId: null,
             sharing: { kind: "private" },
+            updatedAt: new Date().toISOString(),
+            chunkCount: 0,
+            owner: { name: user.name, email: user.email },
+            isOwner: true,
           },
           ...p,
         ])

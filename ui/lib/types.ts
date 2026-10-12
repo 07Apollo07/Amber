@@ -123,6 +123,14 @@ export type UploadRow = {
   collection: string | null
   collectionId: string | null
   sharing: Sharing
+  /** ISO timestamp of the last change to the document in Amber. */
+  updatedAt: string
+  /** Chunks stored in the vector store. */
+  chunkCount: number
+  /** The Amber user who added the file. */
+  owner: { name: string | null; email: string | null }
+  /** False for files shared with the user by someone else. */
+  isOwner: boolean
 }
 
 /** A folder of documents, owned by the signed-in user. */
