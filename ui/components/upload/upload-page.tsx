@@ -13,8 +13,6 @@ import { DocumentSettingsDialog } from "./document-settings-dialog"
 import { DrivePickerPanel } from "./drive-picker-panel"
 import { Dropzone } from "./dropzone"
 import { ManageFiles } from "./manage-files"
-import { OrganizeFields } from "./organize-fields"
-import { SharingSelector } from "./sharing-selector"
 
 /** A document as returned by GET /api/documents/mine. */
 type ApiDocument = {
@@ -75,11 +73,6 @@ export function UploadPage() {
   const [loaded, setLoaded] = useState(false)
   const [managing, setManaging] = useState<UploadRow | null>(null)
 
-  // Settings for the next files added.
-  const [sharing, setSharing] = useState<Sharing>({ kind: "private" })
-  const [collection, setCollection] = useState("none")
-  const [tags, setTags] = useState<string[]>([])
-
   const refresh = useCallback(async () => {
     try {
       const data = await fetchMine()
@@ -118,7 +111,6 @@ export function UploadPage() {
   }, [busy, refresh])
 
   async function uploadFiles(files: File[]) {
-    const selectedCollection = collection === "none" ? "" : collection
     await Promise.all(
       files.map(async (file) => {
         const id = `local-${crypto.randomUUID()}`
@@ -131,19 +123,16 @@ export function UploadPage() {
             progress: 30,
             driveUrl: null,
             saved: false,
-            tags,
-            collection: selectedCollection || null,
+            tags: [],
+            collection: null,
             collectionId: null,
-            sharing,
+            sharing: { kind: "private" },
           },
           ...p,
         ])
         const form = new FormData()
         form.append("file", file)
-        form.append("sharing", sharing.kind)
-        if (sharing.kind === "people") form.append("emails", sharing.emails.join(","))
-        form.append("collection", selectedCollection)
-        form.append("tags", tags.join(","))
+        form.append("sharing", "private")
         try {
           await apiUpload("/api/documents/upload", form)
           await refresh()
@@ -184,33 +173,9 @@ export function UploadPage() {
               <Dropzone onFiles={uploadFiles} />
             </TabsContent>
             <TabsContent value="drive">
-              <DrivePickerPanel
-                collection={collection === "none" ? null : collection}
-                tags={tags}
-                onImported={() => void refresh()}
-              />
+              <DrivePickerPanel onImported={() => void refresh()} />
             </TabsContent>
           </Tabs>
-        </section>
-        <section className="rounded-2xl border bg-card/60 p-5">
-          <h2 className="font-medium">Who can access</h2>
-          <p className="mb-4 text-xs text-muted-foreground">
-            Applies to files you upload from your computer. Files from Google Drive keep their Drive sharing. Change
-            either later with Manage.
-          </p>
-          <SharingSelector value={sharing} onChange={setSharing} domain={user.domain} />
-        </section>
-        <section className="rounded-2xl border bg-card/60 p-5">
-          <h2 className="mb-1 font-medium">Organize</h2>
-          <p className="mb-4 text-xs text-muted-foreground">Applies to the next files you add.</p>
-          <OrganizeFields
-            collection={collection}
-            onCollectionChange={setCollection}
-            tags={tags}
-            onTagsChange={setTags}
-            collections={collections.map((c) => c.name)}
-            knownTags={knownTags}
-          />
         </section>
       </aside>
 
