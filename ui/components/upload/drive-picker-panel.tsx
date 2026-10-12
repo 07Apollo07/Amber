@@ -37,7 +37,16 @@ interface Breadcrumb {
   name: string
 }
 
-export function DrivePickerPanel() {
+export function DrivePickerPanel({
+  collection,
+  tags,
+  onImported,
+}: {
+  /** Applied to every file imported here; null for none. */
+  collection: string | null
+  tags: string[]
+  onImported: () => void
+}) {
   const driveConnected = useSession().drive.connected
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -118,7 +127,7 @@ export function DrivePickerPanel() {
 
     setImporting(true)
     try {
-      const res = await apiPost("/api/drive/import", { file_ids })
+      const res = await apiPost("/api/drive/import", { file_ids, collection, tags })
       const data = (await res.json()) as { imported: any[] }
       toast.success(`Successfully imported and synced ${data.imported.length} file(s) to vector store!`)
       setFiles((prev) =>
@@ -126,7 +135,9 @@ export function DrivePickerPanel() {
       )
       setOpen(false)
       setSelectedIds({})
+      onImported()
     } catch (err) {
+      onImported() // files before the failing one were already added
       toast.error(err instanceof Error ? err.message : "Failed to import files")
     } finally {
       setImporting(false)

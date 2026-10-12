@@ -16,6 +16,10 @@ Row = dict[str, Any]
 # ---- users ----
 
 
+def get_user(conn: Connection, user_id: uuid.UUID) -> Row | None:
+    return fetch_one(conn, "SELECT * FROM users WHERE id = %(id)s", {"id": user_id})
+
+
 def get_user_by_firebase_uid(conn: Connection, firebase_uid: str) -> Row | None:
     row = fetch_one(conn, "SELECT * FROM users WHERE firebase_uid = %(uid)s", {"uid": firebase_uid})
     return row
@@ -300,11 +304,40 @@ def get_document_by_drive_file_id(conn: Connection, owner_id: uuid.UUID, drive_f
     )
 
 
-def list_documents(conn: Connection, limit: int = 100, offset: int = 0) -> list[Row]:
+def list_documents(
+    conn: Connection,
+    *,
+    user_id: uuid.UUID,
+    user_email: str,
+    user_domain: str | None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[Row]:
+    """Documents the user owns or has been granted (by email or by their domain).
+
+    The access check is spelled out here rather than left to row-level security, which Postgres
+    skips for table owners and superusers."""
     return fetch_all(
         conn,
-        "SELECT * FROM documents ORDER BY created_at DESC LIMIT %(limit)s OFFSET %(offset)s",
-        {"limit": limit, "offset": offset},
+        """
+        SELECT d.* FROM documents d
+         WHERE d.owner_id = %(user_id)s
+            OR EXISTS (
+                 SELECT 1 FROM document_access da
+                  WHERE da.document_id = d.id
+                    AND ((da.principal_type = 'user' AND da.principal_value = %(email)s)
+                      OR (da.principal_type = 'domain' AND %(domain)s <> '' AND da.principal_value = %(domain)s))
+               )
+         ORDER BY d.created_at DESC
+         LIMIT %(limit)s OFFSET %(offset)s
+        """,
+        {
+            "user_id": user_id,
+            "email": user_email.lower(),
+            "domain": (user_domain or "").lower(),
+            "limit": limit,
+            "offset": offset,
+        },
     )
 
 
@@ -862,3 +895,152 @@ def set_setting(conn: Connection, key: str, value: Any, updated_by: uuid.UUID | 
 
 def list_settings(conn: Connection) -> list[Row]:
     return fetch_all(conn, "SELECT * FROM settings ORDER BY key ASC")
+
+
+# ---- Upload page: owned documents with their tags, collection and sharing ----
+
+
+def list_owned_documents(conn: Connection, owner_id: uuid.UUID, limit: int = 200) -> list[Row]:
+    """The user's own documents, newest first, each with `tags` (names), `collection` (name or None)
+    and `access` (the user/domain grants that are not the owner's own email)."""
+    return fetch_all(
+        conn,
+        """
+        SELECT d.*,
+               COALESCE((SELECT array_agg(t.name ORDER BY t.name)
+                           FROM document_tags dt JOIN tags t ON t.id = dt.tag_id
+                          WHERE dt.document_id = d.id), '{}') AS tags,
+               (SELECT c.id FROM collection_documents cd JOIN collections c ON c.id = cd.collection_id
+                 WHERE cd.document_id = d.id AND c.owner_id = d.owner_id LIMIT 1) AS collection_id,
+               (SELECT c.name FROM collection_documents cd JOIN collections c ON c.id = cd.collection_id
+                 WHERE cd.document_id = d.id AND c.owner_id = d.owner_id LIMIT 1) AS collection,
+               COALESCE((SELECT json_agg(json_build_object('type', da.principal_type, 'value', da.principal_value))
+                           FROM document_access da WHERE da.document_id = d.id), '[]') AS access
+          FROM documents d
+         WHERE d.owner_id = %(owner_id)s
+         ORDER BY d.created_at DESC
+         LIMIT %(limit)s
+        """,
+        {"owner_id": owner_id, "limit": limit},
+    )
+
+
+def list_collections(conn: Connection, owner_id: uuid.UUID) -> list[Row]:
+    return fetch_all(
+        conn, "SELECT id, name FROM collections WHERE owner_id = %(o)s ORDER BY lower(name)", {"o": owner_id}
+    )
+
+
+def get_collection(conn: Connection, owner_id: uuid.UUID, collection_id: uuid.UUID) -> Row | None:
+    return fetch_one(
+        conn,
+        "SELECT id, name FROM collections WHERE id = %(id)s AND owner_id = %(o)s",
+        {"id": collection_id, "o": owner_id},
+    )
+
+
+def get_collection_by_name(conn: Connection, owner_id: uuid.UUID, name: str) -> Row | None:
+    return fetch_one(
+        conn,
+        "SELECT id, name FROM collections WHERE owner_id = %(o)s AND lower(name) = lower(%(n)s)",
+        {"o": owner_id, "n": name},
+    )
+
+
+def create_collection(conn: Connection, owner_id: uuid.UUID, name: str) -> Row:
+    row = fetch_one(
+        conn,
+        "INSERT INTO collections (owner_id, name) VALUES (%(o)s, %(n)s) RETURNING id, name",
+        {"o": owner_id, "n": name},
+    )
+    if row is None:
+        raise RuntimeError("Failed to create collection")
+    return row
+
+
+def rename_collection(conn: Connection, collection_id: uuid.UUID, name: str) -> None:
+    execute(
+        conn,
+        "UPDATE collections SET name = %(n)s, updated_at = now() WHERE id = %(id)s",
+        {"n": name, "id": collection_id},
+    )
+
+
+def delete_collection(conn: Connection, collection_id: uuid.UUID) -> None:
+    """Removes the folder only; its documents stay and become ungrouped."""
+    execute(conn, "DELETE FROM collections WHERE id = %(id)s", {"id": collection_id})
+
+
+def list_collection_document_ids(conn: Connection, owner_id: uuid.UUID, collection_id: uuid.UUID) -> list[uuid.UUID]:
+    rows = fetch_all(
+        conn,
+        """
+        SELECT cd.document_id FROM collection_documents cd
+          JOIN documents d ON d.id = cd.document_id
+         WHERE cd.collection_id = %(c)s AND d.owner_id = %(o)s
+        """,
+        {"c": collection_id, "o": owner_id},
+    )
+    return [r["document_id"] for r in rows]
+
+
+def list_tag_names(conn: Connection, owner_id: uuid.UUID) -> list[str]:
+    """Tags already used on the user's documents."""
+    rows = fetch_all(
+        conn,
+        """
+        SELECT DISTINCT t.name FROM tags t
+          JOIN document_tags dt ON dt.tag_id = t.id
+          JOIN documents d ON d.id = dt.document_id
+         WHERE d.owner_id = %(o)s ORDER BY t.name
+        """,
+        {"o": owner_id},
+    )
+    return [r["name"] for r in rows]
+
+
+def set_document_organization(
+    conn: Connection, document_id: uuid.UUID, owner_id: uuid.UUID, *, collection: str | None, tags: list[str]
+) -> None:
+    """Replaces the document's tags and collection. Collections are created by name on first use."""
+    execute(conn, "DELETE FROM document_tags WHERE document_id = %(d)s", {"d": document_id})
+    for name in dict.fromkeys(tags):
+        tag = fetch_one(
+            conn,
+            """
+            INSERT INTO tags (name) VALUES (%(name)s)
+            ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id
+            """,
+            {"name": name},
+        )
+        if tag:
+            execute(
+                conn,
+                "INSERT INTO document_tags (document_id, tag_id) VALUES (%(d)s, %(t)s) ON CONFLICT DO NOTHING",
+                {"d": document_id, "t": tag["id"]},
+            )
+
+    execute(
+        conn,
+        """
+        DELETE FROM collection_documents cd USING collections c
+         WHERE cd.collection_id = c.id AND cd.document_id = %(d)s AND c.owner_id = %(o)s
+        """,
+        {"d": document_id, "o": owner_id},
+    )
+    if collection:
+        coll = get_collection_by_name(conn, owner_id, collection) or create_collection(conn, owner_id, collection)
+        if coll:
+            execute(
+                conn,
+                "INSERT INTO collection_documents (collection_id, document_id) VALUES (%(c)s, %(d)s) ON CONFLICT DO NOTHING",
+                {"c": coll["id"], "d": document_id},
+            )
+
+
+def set_document_sharing_option(conn: Connection, document_id: uuid.UUID, sharing_option: str) -> None:
+    execute(
+        conn,
+        "UPDATE documents SET sharing_option = %(s)s, updated_at = now() WHERE id = %(id)s",
+        {"s": sharing_option, "id": document_id},
+    )
