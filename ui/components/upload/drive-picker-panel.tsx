@@ -37,7 +37,7 @@ interface Breadcrumb {
   name: string
 }
 
-export function DrivePickerPanel() {
+export function DrivePickerPanel({ onImported }: { onImported: () => void }) {
   const driveConnected = useSession().drive.connected
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -126,7 +126,9 @@ export function DrivePickerPanel() {
       )
       setOpen(false)
       setSelectedIds({})
+      onImported()
     } catch (err) {
+      onImported() // files before the failing one were already added
       toast.error(err instanceof Error ? err.message : "Failed to import files")
     } finally {
       setImporting(false)

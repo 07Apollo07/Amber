@@ -109,6 +109,7 @@ export type AuditEvent = {
 }
 
 export type UploadRow = {
+  /** The document id once it exists on the server; a temporary id while the upload is in flight. */
   id: string
   name: string
   sizeBytes: number
@@ -116,6 +117,18 @@ export type UploadRow = {
   progress: number
   error?: string
   driveUrl: string | null
+  /** False for an upload that has not reached the server yet. */
+  saved: boolean
+  tags: string[]
+  collection: string | null
+  collectionId: string | null
+  sharing: Sharing
+}
+
+/** A folder of documents, owned by the signed-in user. */
+export type Collection = {
+  id: string
+  name: string
 }
 
 export type SearchHistoryItem = {

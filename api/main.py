@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 
-from amber.api import auth, documents, drive, me
+from amber.api import auth, collections, documents, drive, me
 from amber.util.config import Settings, get_settings
 from amber.util.firebase import init_firebase
 from amber.util.ratelimit import RateLimited, rate_limited_response
@@ -48,6 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth.router)
     app.include_router(me.router)
     app.include_router(documents.router)
+    app.include_router(collections.router)
     app.include_router(drive.router)
     return app
 

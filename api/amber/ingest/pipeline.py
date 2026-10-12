@@ -110,7 +110,6 @@ def process_document_upload(
         conn.commit()
         return {
             "document_id": str(doc_id),
-            "external_id": external_id,
             "title": filename,
             "chunks_count": len(chunks_data),
             "drive_file_id": drive_file_id,

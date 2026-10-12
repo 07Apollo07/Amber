@@ -6,14 +6,17 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from amber import repository
+from amber.api.documents import apply_organization
 from amber.util import drive
-from amber.util.security import CurrentUser, DbDep
+from amber.util.security import CsrfProtected, CurrentUser, DbDep
 
 router = APIRouter(prefix="/api/drive", tags=["drive"])
 
 
 class DriveImportRequest(BaseModel):
     file_ids: list[str]
+    collection: str | None = None
+    tags: list[str] = []
 
 
 @router.get("/files")
@@ -83,7 +86,7 @@ def list_drive_files(
         raise HTTPException(status_code=500, detail=f"Failed to list Google Drive files: {exc}") from exc
 
 
-@router.post("/import")
+@router.post("/import", dependencies=[CsrfProtected])
 def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) -> dict[str, Any]:
     """Imports files selected from Google Drive Picker, downloads content, fetches ACLs, and indexes them."""
     drive_service = drive.build_drive_service(user["id"], conn)
@@ -182,6 +185,8 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
 
             # Mark as successfully indexed
             repository.update_document_status(conn, doc_id, "indexed")
+
+            apply_organization(conn, user, doc_id, collection=req.collection, tags=req.tags)
 
             imported.append({"document_id": str(doc_id), "file_id": file_id, "title": filename})
         except Exception as exc:
