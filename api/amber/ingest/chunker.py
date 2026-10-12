@@ -1,16 +1,18 @@
-"""Text chunking using LangChain and tiktoken (~800 tokens, 15% overlap)."""
+"""Text chunking using LangChain and tiktoken (sizes come from Admin > Settings; default ~800 tokens, 15% overlap)."""
 
 from typing import Any
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
-def chunk_document_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Splits parsed document blocks into chunks with token counts and metadata."""
+def chunk_document_blocks(
+    blocks: list[dict[str, Any]], chunk_size: int = 800, chunk_overlap: int = 120
+) -> list[dict[str, Any]]:
+    """Splits parsed document blocks into chunks with token counts and metadata. Sizes are in tokens."""
     splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
         encoding_name="cl100k_base",
-        chunk_size=800,
-        chunk_overlap=120,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
     )
 
     chunks = []

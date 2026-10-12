@@ -1,10 +1,18 @@
 "use client"
 
+import { useState } from "react"
+import { toast } from "sonner"
+
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { demoAction } from "@/lib/demo"
+import { apiPut } from "@/lib/api"
+
+import { useAdminData } from "./use-admin-data"
+
+type Indexing = { chunk_size_tokens: number; chunk_overlap_pct: number; max_upload_mb: number }
+type SettingsResponse = { indexing: Indexing; limits: Record<keyof Indexing, { min: number; max: number }> }
 
 function Field({ id, label, hint, children }: { id: string; label: string; hint: string; children: React.ReactNode }) {
   return (
@@ -18,27 +26,96 @@ function Field({ id, label, hint, children }: { id: string; label: string; hint:
   )
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
   return (
     <section className="rounded-2xl border bg-card/60 p-5">
-      <h3 className="mb-5 font-medium">{title}</h3>
-      <div className="space-y-5">{children}</div>
+      <h3 className="font-medium">{title}</h3>
+      {note && <p className="mt-1 text-xs text-muted-foreground">{note}</p>}
+      <div className="mt-5 space-y-5">{children}</div>
     </section>
   )
 }
 
 export function SettingsTab() {
+  const { data, error, reload } = useAdminData<SettingsResponse>("/api/admin/settings")
+  if (error) {
+    return (
+      <p role="alert" className="text-sm text-destructive">
+        Couldn&apos;t load settings: {error}
+      </p>
+    )
+  }
+  if (!data) return <p className="text-sm text-muted-foreground">Loading settings…</p>
+  // Keyed by the saved values so the form resets to them after a save.
+  return <SettingsForm key={JSON.stringify(data.indexing)} initial={data.indexing} limits={data.limits} onSaved={reload} />
+}
+
+function SettingsForm({
+  initial,
+  limits,
+  onSaved,
+}: {
+  initial: Indexing
+  limits: SettingsResponse["limits"]
+  onSaved: () => void
+}) {
+  const [values, setValues] = useState<Record<keyof Indexing, string>>({
+    chunk_size_tokens: String(initial.chunk_size_tokens),
+    chunk_overlap_pct: String(initial.chunk_overlap_pct),
+    max_upload_mb: String(initial.max_upload_mb),
+  })
+  const [saving, setSaving] = useState(false)
+
+  function input(name: keyof Indexing, id: string, step?: number) {
+    return (
+      <Input
+        id={id}
+        type="number"
+        required
+        min={limits[name].min}
+        max={limits[name].max}
+        step={step}
+        value={values[name]}
+        onChange={(e) => setValues((v) => ({ ...v, [name]: e.target.value }))}
+      />
+    )
+  }
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault()
+    setSaving(true)
+    try {
+      await apiPut("/api/admin/settings", {
+        chunk_size_tokens: Number(values.chunk_size_tokens),
+        chunk_overlap_pct: Number(values.chunk_overlap_pct),
+        max_upload_mb: Number(values.max_upload_mb),
+      })
+      toast.success("Settings saved", { description: "Applies to files indexed from now on. Existing files keep their chunks." })
+      onSaved()
+    } catch (err) {
+      toast.error("Couldn't save settings", { description: (err as Error).message })
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
-    <form
-      className="space-y-6"
-      onSubmit={(event) => {
-        event.preventDefault()
-        demoAction("Settings saved", "Demo only. Changes are versioned and audited once connected.")
-      }}
-    >
-      <Section title="Answers">
+    <form className="space-y-6" onSubmit={save}>
+      <Section title="Indexing" note="Used when Amber reads, splits and stores a file. Every change is recorded in the audit log.">
+        <Field id="chunk-size" label="Chunk size (tokens)" hint="Larger chunks keep more context per passage.">
+          {input("chunk_size_tokens", "chunk-size", 50)}
+        </Field>
+        <Field id="chunk-overlap" label="Chunk overlap (%)" hint="Overlap between neighbouring chunks.">
+          {input("chunk_overlap_pct", "chunk-overlap")}
+        </Field>
+        <Field id="max-upload" label="Max file size (MB)" hint="Larger uploads and Drive imports are rejected.">
+          {input("max_upload_mb", "max-upload")}
+        </Field>
+      </Section>
+
+      <Section title="Answers" note="Not active yet. These apply once answering is built.">
         <Field id="model" label="Answer model" hint="Gemini model used to write answers.">
-          <Select defaultValue="flash">
+          <Select defaultValue="flash" disabled>
             <SelectTrigger id="model" className="w-full">
               <SelectValue />
             </SelectTrigger>
@@ -48,51 +125,15 @@ export function SettingsTab() {
             </SelectContent>
           </Select>
         </Field>
-        <Field id="reranker" label="Reranker" hint="Orders retrieved passages before answering.">
-          <Select defaultValue="cross-encoder">
-            <SelectTrigger id="reranker" className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="cross-encoder">Local cross-encoder</SelectItem>
-              <SelectItem value="llm">Gemini listwise rerank</SelectItem>
-            </SelectContent>
-          </Select>
-        </Field>
         <Field id="top-k" label="Passages per answer" hint="How many reranked passages go to the model.">
-          <Input id="top-k" type="number" min={1} max={20} defaultValue={8} />
+          <Input id="top-k" type="number" defaultValue={8} disabled />
         </Field>
       </Section>
 
-      <Section title="Indexing">
-        <Field id="chunk-size" label="Chunk size (tokens)" hint="Larger chunks keep more context per passage.">
-          <Input id="chunk-size" type="number" min={200} max={2000} step={50} defaultValue={800} />
-        </Field>
-        <Field id="chunk-overlap" label="Chunk overlap (%)" hint="Overlap between neighbouring chunks.">
-          <Input id="chunk-overlap" type="number" min={0} max={50} defaultValue={15} />
-        </Field>
-        <Field id="sync" label="Drive sync interval" hint="How often Drive edits and sharing changes are pulled.">
-          <Select defaultValue="15">
-            <SelectTrigger id="sync" className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="5">Every 5 minutes</SelectItem>
-              <SelectItem value="15">Every 15 minutes</SelectItem>
-              <SelectItem value="60">Every hour</SelectItem>
-            </SelectContent>
-          </Select>
-        </Field>
-        <Field id="max-upload" label="Max upload size (MB)" hint="Per file. The server enforces this too.">
-          <Input id="max-upload" type="number" min={1} max={200} defaultValue={50} />
-        </Field>
-      </Section>
-
-      <div className="flex justify-end gap-2">
-        <Button type="reset" variant="ghost">
-          Reset
+      <div className="flex justify-end">
+        <Button type="submit" disabled={saving}>
+          Save settings
         </Button>
-        <Button type="submit">Save settings</Button>
       </div>
     </form>
   )

@@ -168,6 +168,12 @@ def _upsert_user(conn: Connection, settings: Settings, identity: dict, firebase_
     }
     existing = repository.lock_user_by_google_sub(conn, identity["sub"])
     if existing is None:
+        # An admin may have added this person's email in advance. Their first sign-in claims that account.
+        pending = repository.lock_pending_user_by_email(conn, identity["email"])
+        if pending is not None:
+            repository.claim_pending_user(conn, pending["id"], google_sub=identity["sub"])
+            existing = repository.lock_user_by_google_sub(conn, identity["sub"])
+    if existing is None:
         role = "admin" if identity["email"] in settings.bootstrap_admins else "member"
         created = repository.insert_user(conn, google_sub=identity["sub"], role=role, **profile)
         if created is not None:

@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 
-from amber.api import auth, collections, documents, drive, me
+from amber.api import admin, auth, collections, documents, drive, me
 from amber.util.config import Settings, get_settings
 from amber.util.firebase import init_firebase
 from amber.util.ratelimit import RateLimited, rate_limited_response
@@ -45,6 +45,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    app.include_router(admin.router)
     app.include_router(auth.router)
     app.include_router(me.router)
     app.include_router(documents.router)

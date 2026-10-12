@@ -6,6 +6,7 @@ from typing import Any
 
 from amber import repository
 from amber.ingest.chunker import chunk_document_blocks
+from amber.ingest import settings as indexing_settings
 from amber.ingest.embedder import generate_embeddings
 from amber.ingest.parser import parse_document
 from amber.util import db, drive
@@ -22,7 +23,8 @@ def index_document_content(conn: Any, doc_id: uuid.UUID, file_bytes: bytes, mime
     try:
         blocks = parse_document(file_bytes, mime_type, filename)
         stage = "splitting the text into chunks"
-        chunks_data = chunk_document_blocks(blocks)
+        cfg = indexing_settings.load(conn)
+        chunks_data = chunk_document_blocks(blocks, cfg.chunk_size_tokens, cfg.chunk_overlap_tokens)
         if not chunks_data:
             raise IndexingError(
                 "No readable text was found in this file. It may be a scan or image-only document, or it may be empty."

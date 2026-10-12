@@ -9,7 +9,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiUpload } from "@/lib/api"
 import { googleSignInUrl } from "@/lib/auth-paths"
 import { useSession } from "@/lib/session-context"
-import type { Collection, IngestionStatus, Sharing, UploadRow } from "@/lib/types"
+import { ingestionStatusFromApi } from "@/lib/format"
+import type { Collection, Sharing, UploadRow } from "@/lib/types"
 
 import { DocumentSettingsDialog } from "./document-settings-dialog"
 import { DrivePickerPanel } from "./drive-picker-panel"
@@ -34,15 +35,6 @@ type ApiDocument = {
   is_owner: boolean
 }
 
-const STATUS: Record<string, IngestionStatus> = {
-  queued: "queued",
-  saving_to_drive: "saving_to_drive",
-  parsing: "parsing",
-  indexing: "embedding",
-  indexed: "ready",
-  failed: "failed",
-}
-
 async function fetchMine() {
   const res = await fetch("/api/documents/mine", { credentials: "same-origin" })
   if (!res.ok) throw new Error(`Request failed (${res.status})`)
@@ -50,7 +42,7 @@ async function fetchMine() {
 }
 
 function toRow(doc: ApiDocument): UploadRow {
-  const status = STATUS[doc.status] ?? "queued"
+  const status = ingestionStatusFromApi(doc.status)
   return {
     id: doc.id,
     name: doc.title,

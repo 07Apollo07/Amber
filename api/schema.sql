@@ -254,4 +254,13 @@ BEGIN
   END IF;
 END $$;
 
+-- Admin page: settings record who changed them, and admins can delete users.
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS updated_by uuid REFERENCES users (id) ON DELETE SET NULL;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'amber_app') THEN
+    GRANT DELETE ON users TO amber_app;
+  END IF;
+END $$;
+
 COMMIT;

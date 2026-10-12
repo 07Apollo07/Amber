@@ -1057,3 +1057,99 @@ def set_document_sharing_option(conn: Connection, document_id: uuid.UUID, sharin
         "UPDATE documents SET sharing_option = %(s)s, updated_at = now() WHERE id = %(id)s",
         {"s": sharing_option, "id": document_id},
     )
+
+
+# ---- Admin: users and every document's access ----
+
+PENDING_PREFIX = "pending:"
+
+
+def list_users_with_counts(conn: Connection) -> list[Row]:
+    """All users, newest first, with how many documents each owns. `pending` is true for accounts an
+    admin added that haven't signed in yet."""
+    return fetch_all(
+        conn,
+        """
+        SELECT u.id, u.email, u.name, u.role, u.status, u.created_at, u.last_login_at,
+               (u.google_sub LIKE %(prefix)s) AS pending,
+               (SELECT count(*) FROM documents d WHERE d.owner_id = u.id) AS document_count
+          FROM users u
+         ORDER BY u.created_at DESC
+        """,
+        {"prefix": PENDING_PREFIX + "%"},
+    )
+
+
+def get_user_by_email(conn: Connection, email: str) -> Row | None:
+    return fetch_one(conn, "SELECT * FROM users WHERE lower(email) = lower(%(e)s) LIMIT 1", {"e": email})
+
+
+def insert_pending_user(conn: Connection, *, email: str, name: str, domain: str | None, role: str) -> Row:
+    """Creates an account for someone who hasn't signed in. Their first Google sign-in claims it."""
+    token = uuid.uuid4().hex
+    row = fetch_one(
+        conn,
+        """
+        INSERT INTO users (firebase_uid, google_sub, email, domain, name, role)
+        VALUES (%(uid)s, %(sub)s, %(email)s, %(domain)s, %(name)s, %(role)s)
+        RETURNING *
+        """,
+        {"uid": PENDING_PREFIX + token, "sub": PENDING_PREFIX + token, "email": email, "domain": domain, "name": name, "role": role},
+    )
+    if row is None:
+        raise RuntimeError("Failed to add user")
+    return row
+
+
+def lock_pending_user_by_email(conn: Connection, email: str) -> Row | None:
+    """A user an admin added in advance, matched by email at their first sign-in."""
+    return fetch_one(
+        conn,
+        "SELECT * FROM users WHERE lower(email) = lower(%(e)s) AND google_sub LIKE %(prefix)s FOR UPDATE",
+        {"e": email, "prefix": PENDING_PREFIX + "%"},
+    )
+
+
+def claim_pending_user(conn: Connection, user_id: uuid.UUID, *, google_sub: str) -> None:
+    execute(conn, "UPDATE users SET google_sub = %(sub)s WHERE id = %(id)s", {"id": user_id, "sub": google_sub})
+
+
+def set_user_role_status(conn: Connection, user_id: uuid.UUID, *, role: str, status: str) -> Row | None:
+    return fetch_one(
+        conn,
+        "UPDATE users SET role = %(role)s, status = %(status)s, updated_at = now() WHERE id = %(id)s RETURNING *",
+        {"id": user_id, "role": role, "status": status},
+    )
+
+
+def count_active_admins(conn: Connection) -> int:
+    row = fetch_one(conn, "SELECT count(*) AS n FROM users WHERE role = 'admin' AND status = 'active'")
+    return int(row["n"]) if row else 0
+
+
+def delete_user(conn: Connection, user_id: uuid.UUID) -> None:
+    """Removes the account and, through foreign keys, their documents, chunks, collections and tokens."""
+    execute(conn, "DELETE FROM users WHERE id = %(id)s", {"id": user_id})
+
+
+def list_all_documents(conn: Connection, limit: int = 500) -> list[Row]:
+    """Every document with its owner, tags and full access list. Metadata only, never the text."""
+    return fetch_all(
+        conn,
+        """
+        SELECT d.id, d.title, d.file_type, d.origin, d.status, d.status_message, d.sharing_option,
+               d.drive_file_id, d.file_size_bytes, d.created_at, d.updated_at,
+               u.name AS owner_name, u.email AS owner_email,
+               (SELECT count(*) FROM chunks ch WHERE ch.document_id = d.id) AS chunk_count,
+               COALESCE((SELECT array_agg(t.name ORDER BY t.name)
+                           FROM document_tags dt JOIN tags t ON t.id = dt.tag_id
+                          WHERE dt.document_id = d.id), '{}') AS tags,
+               COALESCE((SELECT json_agg(json_build_object('type', da.principal_type, 'value', da.principal_value,
+                                                           'origin', da.origin) ORDER BY da.principal_type, da.principal_value)
+                           FROM document_access da WHERE da.document_id = d.id), '[]') AS access
+          FROM documents d JOIN users u ON u.id = d.owner_id
+         ORDER BY d.created_at DESC
+         LIMIT %(limit)s
+        """,
+        {"limit": limit},
+    )

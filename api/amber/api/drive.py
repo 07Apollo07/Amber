@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from amber import repository
 from amber.api.documents import apply_organization
+from amber.ingest import settings as indexing_settings
 from amber.ingest.pipeline import IndexingError, index_document_content, mark_document_failed
 from amber.util import drive
 from amber.util.security import CsrfProtected, CurrentUser, DbDep
@@ -97,6 +98,7 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
     if not drive_service:
         raise HTTPException(status_code=400, detail="Google Drive is not connected for this user")
 
+    max_bytes = indexing_settings.load(conn).max_upload_bytes
     imported = []
     skipped: list[str] = []
     failed: list[dict[str, str]] = []
@@ -129,6 +131,8 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
                 request_obj = drive_service.files().get_media(fileId=file_id)
 
             file_bytes = request_obj.execute()
+            if len(file_bytes) > max_bytes:
+                raise ValueError(f"File is larger than the {max_bytes // (1024 * 1024)} MB size limit set by your admin")
 
             # Fetch file permissions
             grants = drive.fetch_drive_permissions(drive_service, file_id)

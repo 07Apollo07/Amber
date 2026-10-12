@@ -8,6 +8,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from amber import repository
+from amber.ingest import settings as indexing_settings
 from amber.ingest.pipeline import process_document_upload
 from amber.util import drive
 from amber.util.security import CsrfProtected, CurrentUser, DbDep
@@ -213,9 +214,12 @@ def upload_document(
     tags: str = Form(""),  # comma separated
 ) -> dict[str, Any]:
     """Uploads a local file, saves to Google Drive, parses, embeds, and indexes it."""
-    file_bytes = file.file.read()
+    max_bytes = indexing_settings.load(conn).max_upload_bytes
+    file_bytes = file.file.read(max_bytes + 1)  # one extra byte tells us it is over the limit without reading it all
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file uploaded")
+    if len(file_bytes) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"File is larger than the {max_bytes // (1024 * 1024)} MB upload limit")
 
     filename = file.filename or "upload.txt"
     mime_type = file.content_type or "application/octet-stream"
