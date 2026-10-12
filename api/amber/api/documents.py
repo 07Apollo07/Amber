@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from amber import repository
 from amber.ingest.pipeline import process_document_upload
+from amber.util import drive
 from amber.util.security import CsrfProtected, CurrentUser, DbDep
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -88,6 +89,17 @@ def apply_organization(
     )
 
 
+def sync_access_to_drive(drive_service: Any, drive_file_id: str, access: tuple[str, list[dict[str, Any]]]) -> None:
+    """Makes the file's Google Drive sharing match `access`. Raises drive.DriveSharingError."""
+    grants = access[1]
+    drive.sync_file_sharing(
+        drive_service,
+        drive_file_id,
+        emails={g["principal_value"] for g in grants[1:] if g["principal_type"] == "user"},  # grants[0] is the owner
+        domain=next((g["principal_value"] for g in grants if g["principal_type"] == "domain"), None),
+    )
+
+
 def apply_access(conn: Any, document_id: uuid.UUID, access: tuple[str, list[dict[str, Any]]]) -> None:
     sharing_option, grants = access
     repository.set_document_access(conn, document_id, grants)
@@ -106,11 +118,12 @@ def list_my_documents(user: CurrentUser, conn: DbDep) -> dict[str, Any]:
     }
 
 
-def _require_owned(conn: Any, user: dict[str, Any], document_id: uuid.UUID) -> None:
+def _require_owned(conn: Any, user: dict[str, Any], document_id: uuid.UUID) -> dict[str, Any]:
     repository.set_app_user_context(conn, user["email"], user["domain"])
     doc = repository.get_document(conn, document_id)
     if not doc or doc["owner_id"] != user["id"]:
         raise HTTPException(status_code=404, detail="Document not found")
+    return doc
 
 
 @router.put("/{document_id}/organize", dependencies=[CsrfProtected])
@@ -123,8 +136,17 @@ def organize_document(user: CurrentUser, conn: DbDep, document_id: uuid.UUID, re
 
 @router.put("/{document_id}/access", dependencies=[CsrfProtected])
 def update_document_access(user: CurrentUser, conn: DbDep, document_id: uuid.UUID, req: AccessRequest) -> dict[str, Any]:
-    _require_owned(conn, user, document_id)
+    doc = _require_owned(conn, user, document_id)
     access = build_access(user, req.kind, req.emails)
+    if doc["drive_file_id"]:
+        # Drive first: if it refuses, Amber's access list stays as it was so the two never disagree.
+        drive_service = drive.build_drive_service(user["id"], conn)
+        if drive_service is None:
+            raise HTTPException(status_code=400, detail="Google Drive isn't connected. Reconnect it to change sharing.")
+        try:
+            sync_access_to_drive(drive_service, doc["drive_file_id"], access)
+        except drive.DriveSharingError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
     apply_access(conn, document_id, access)
     repository.insert_audit(
         conn,

@@ -151,5 +151,5 @@ export type SessionUser = {
   picture: string | null
   domain: string | null
   role: Role
-  drive: { connected: boolean; scopes: string[] }
+  drive: { connected: boolean; can_share: boolean; scopes: string[] }
 }

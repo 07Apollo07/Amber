@@ -119,8 +119,15 @@ export function DrivePickerPanel({ onImported }: { onImported: () => void }) {
     setImporting(true)
     try {
       const res = await apiPost("/api/drive/import", { file_ids })
-      const data = (await res.json()) as { imported: any[] }
-      toast.success(`Successfully imported and synced ${data.imported.length} file(s) to vector store!`)
+      const data = (await res.json()) as { imported: unknown[]; skipped?: string[] }
+      if (data.imported.length > 0) {
+        toast.success(`Imported ${data.imported.length} ${data.imported.length === 1 ? "file" : "files"}`)
+      }
+      if (data.skipped?.length) {
+        toast.warning(`Skipped ${data.skipped.length} unsupported ${data.skipped.length === 1 ? "file" : "files"}`, {
+          description: data.skipped.join(", "),
+        })
+      }
       setFiles((prev) =>
         prev.map((f) => (file_ids.includes(f.id) ? { ...f, synced: true } : f))
       )

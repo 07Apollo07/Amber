@@ -1,11 +1,13 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
-import { Cloud, HardDrive, Info } from "lucide-react"
+import { Cloud, HardDrive, Info, ShieldAlert } from "lucide-react"
 import { toast } from "sonner"
 
+import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { apiUpload } from "@/lib/api"
+import { googleSignInUrl } from "@/lib/auth-paths"
 import { useSession } from "@/lib/session-context"
 import type { Collection, IngestionStatus, Sharing, UploadRow } from "@/lib/types"
 
@@ -183,6 +185,17 @@ export function UploadPage() {
         <h2 id="manage-files-heading" className="mb-3 text-sm font-medium">
           Manage Files
         </h2>
+        {driveConnected && !user.drive.can_share && (
+          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-warning/30 bg-warning/10 px-3 py-2.5 text-sm">
+            <ShieldAlert className="size-4 shrink-0 text-warning" />
+            <span className="min-w-0 flex-1">
+              To change sharing in Google Drive too, Amber needs permission to manage your Drive files.
+            </span>
+            <Button size="sm" variant="outline" asChild>
+              <a href={googleSignInUrl("/upload", { reconnect: true })}>Allow access</a>
+            </Button>
+          </div>
+        )}
         {loaded ? (
           <ManageFiles
             pending={pending}

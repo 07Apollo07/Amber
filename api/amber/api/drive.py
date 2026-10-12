@@ -94,7 +94,9 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
         raise HTTPException(status_code=400, detail="Google Drive is not connected for this user")
 
     imported = []
+    skipped: list[str] = []
     for file_id in req.file_ids:
+        doc_id = None  # so a failure here never marks the previous file's document as failed
         try:
             # Get file metadata
             file_meta = (
@@ -105,18 +107,18 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
             filename = file_meta.get("name", "Untitled")
             mime_type = file_meta.get("mimeType", "application/octet-stream")
 
-            # Export Google Docs/Sheets/Slides to export formats if needed, or get media content
-            if mime_type.startswith("application/vnd.google-apps."):
-                if mime_type == "application/vnd.google-apps.document":
-                    mime_type = "application/pdf"
-                    request_obj = drive_service.files().export_media(fileId=file_id, mimeType=mime_type)
-                    filename += ".pdf"
-                elif mime_type == "application/vnd.google-apps.spreadsheet":
-                    mime_type = "application/pdf"
-                    request_obj = drive_service.files().export_media(fileId=file_id, mimeType=mime_type)
-                    filename += ".pdf"
-                else:
-                    continue  # Skip unsupported google apps types for now
+            # Google Docs, Sheets and Slides are exported to Word, Excel and PowerPoint so they parse like uploads.
+            # `title` is what the user sees; `parse_name` tells the parser which format the bytes are.
+            title = filename
+            parse_name = filename
+            file_type = filename.rsplit(".", 1)[-1].lower() if "." in filename else "unknown"
+            if mime_type in drive.GOOGLE_EXPORTS:
+                file_type, mime_type, extension = drive.GOOGLE_EXPORTS[mime_type]
+                parse_name = filename + extension
+                request_obj = drive_service.files().export_media(fileId=file_id, mimeType=mime_type)
+            elif mime_type.startswith("application/vnd.google-apps."):
+                skipped.append(filename)  # Forms, Drawings, Sites and so on have nothing to index
+                continue
             else:
                 request_obj = drive_service.files().get_media(fileId=file_id)
 
@@ -139,8 +141,8 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
                 owner_id=user["id"],
                 origin="drive_sync",
                 drive_file_id=file_id,
-                title=filename,
-                file_type=filename.split(".")[-1].lower() if "." in filename else "unknown",
+                title=title,
+                file_type=file_type,
                 file_size_bytes=size_bytes,
                 mime_type=mime_type,
                 sha256=checksum,
@@ -166,7 +168,7 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
             from amber.ingest.embedder import generate_embeddings
             from amber.ingest.parser import parse_document
 
-            blocks = parse_document(file_bytes, mime_type, filename)
+            blocks = parse_document(file_bytes, mime_type, parse_name)
             chunks_data = chunk_document_blocks(blocks)
             texts = [c["content"] for c in chunks_data]
             embeddings = generate_embeddings(texts)
@@ -188,11 +190,11 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
 
             apply_organization(conn, user, doc_id, collection=req.collection, tags=req.tags)
 
-            imported.append({"document_id": str(doc_id), "file_id": file_id, "title": filename})
+            imported.append({"document_id": str(doc_id), "file_id": file_id, "title": title})
         except Exception as exc:
             # Log error per file and mark as failed in db if doc_id was created
             print(f"Error importing Drive file {file_id}: {exc}")
-            if 'doc_id' in locals() and doc_id:
+            if doc_id:
                 try:
                     repository.update_document_status(conn, doc_id, "failed", status_message=str(exc))
                 except Exception:
@@ -209,4 +211,4 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
         ip=None,
     )
     conn.commit()
-    return {"success": True, "imported": imported}
+    return {"success": True, "imported": imported, "skipped": skipped}

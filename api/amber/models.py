@@ -1,6 +1,12 @@
 """Shared constants and helpers for the auth tables (schema.sql). Rows are plain dicts."""
 
-DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+# Full Drive access: Amber reads imports, saves uploads, and changes who a file is shared with.
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+
+
+def can_manage_drive_sharing(scopes: str) -> bool:
+    """Changing a file's Drive sharing needs the full drive scope (drive.readonly can't write)."""
+    return DRIVE_SCOPE in (scopes or "").split()
 
 
 def drive_connected(has_refresh_token: bool, scopes: str) -> bool:

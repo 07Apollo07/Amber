@@ -12,6 +12,27 @@ from amber.util.config import get_settings
 from amber.util.crypto import decrypt_token
 
 
+# Google-native files have no bytes of their own, so they're exported to an Office format that our
+# parsers read. Value: (file_type stored in Amber, export mime type, extension used for parsing).
+GOOGLE_EXPORTS: dict[str, tuple[str, str, str]] = {
+    "application/vnd.google-apps.document": (
+        "gdoc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".docx",
+    ),
+    "application/vnd.google-apps.spreadsheet": (
+        "gsheet",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".xlsx",
+    ),
+    "application/vnd.google-apps.presentation": (
+        "gslides",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".pptx",
+    ),
+}
+
+
 def get_drive_credentials(user_id: Any, conn: Any) -> Credentials | None:
     settings = get_settings()
     token_row = repository.get_token(conn, user_id)
@@ -115,3 +136,88 @@ def fetch_drive_permissions(drive_service: Any, file_id: str) -> list[dict[str, 
         # Group entries or others are conservatively ignored per spec.
 
     return grants
+
+
+class DriveSharingError(Exception):
+    """A Drive permission change failed. The message is safe to show the user."""
+
+
+def _drive_error_message(exc: Exception, subject: str) -> str:
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    detail = str(exc)
+    if status == 403 and "insufficient" in detail.lower():
+        return "Amber doesn't have permission to change sharing in Google Drive yet. Sign in again and allow full Drive access."
+    if status in (403, 404):
+        return f"You can't change sharing for this file in Google Drive{subject}. Only people with edit access to it can."
+    if status == 400 and "no google account" in detail.lower():
+        return f"Google Drive can't share with {subject} because that address has no Google account."
+    return f"Google Drive rejected the sharing change{subject}."
+
+
+def sync_file_sharing(
+    drive_service: Any,
+    file_id: str,
+    *,
+    emails: set[str],
+    domain: str | None,
+) -> None:
+    """Makes the file's Drive sharing match: viewers are exactly `emails` plus `domain` (if given).
+
+    Adds missing people as viewers without sending an email, and removes people and domains that are no
+    longer listed. The file owner is never touched. Link sharing ("anyone") and groups are left as they are.
+    Raises DriveSharingError with a user-safe message on failure."""
+    wanted = {e.lower() for e in emails}
+    wanted_domain = domain.lower() if domain else None
+    try:
+        existing = (
+            drive_service.permissions()
+            .list(fileId=file_id, fields="permissions(id, role, type, emailAddress, domain)")
+            .execute()
+            .get("permissions", [])
+        )
+    except Exception as exc:
+        raise DriveSharingError(_drive_error_message(exc, "")) from exc
+
+    have_users: set[str] = set()
+    have_domain = False
+    to_remove: list[str] = []
+    for perm in existing:
+        if perm.get("role") == "owner":
+            continue
+        if perm.get("type") == "user":
+            email = (perm.get("emailAddress") or "").lower()
+            have_users.add(email)
+            if email not in wanted:
+                to_remove.append(perm["id"])
+        elif perm.get("type") == "domain":
+            if (perm.get("domain") or "").lower() == wanted_domain:
+                have_domain = True
+            else:
+                to_remove.append(perm["id"])
+
+    for email in sorted(wanted - have_users):
+        try:
+            drive_service.permissions().create(
+                fileId=file_id,
+                body={"type": "user", "role": "reader", "emailAddress": email},
+                sendNotificationEmail=False,
+                fields="id",
+            ).execute()
+        except Exception as exc:
+            raise DriveSharingError(_drive_error_message(exc, email)) from exc
+
+    if wanted_domain and not have_domain:
+        try:
+            drive_service.permissions().create(
+                fileId=file_id,
+                body={"type": "domain", "role": "reader", "domain": wanted_domain},
+                fields="id",
+            ).execute()
+        except Exception as exc:
+            raise DriveSharingError(_drive_error_message(exc, f" with {wanted_domain}")) from exc
+
+    for permission_id in to_remove:
+        try:
+            drive_service.permissions().delete(fileId=file_id, permissionId=permission_id).execute()
+        except Exception as exc:
+            raise DriveSharingError(_drive_error_message(exc, "")) from exc

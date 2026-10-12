@@ -134,11 +134,21 @@ export function CollectionShareDialog({
             disabled={busy || rows.length === 0}
             onClick={() =>
               run(async () => {
-                await apiPut(`/api/collections/${collection.id}/access`, {
+                const res = await apiPut(`/api/collections/${collection.id}/access`, {
                   kind: sharing.kind,
                   emails: sharing.kind === "people" ? sharing.emails : [],
                 })
-                return `Updated access for ${rows.length} ${rows.length === 1 ? "document" : "documents"}`
+                const { updated, failed } = (await res.json()) as {
+                  updated: number
+                  failed: { title: string; error: string }[]
+                }
+                if (failed.length > 0) {
+                  toast.error(`${failed.length} ${failed.length === 1 ? "file" : "files"} couldn't be shared`, {
+                    description: failed.map((f) => `${f.title}: ${f.error}`).join("\n"),
+                    duration: 12000,
+                  })
+                }
+                if (updated > 0) return `Updated access for ${updated} ${updated === 1 ? "document" : "documents"}`
               })
             }
           >

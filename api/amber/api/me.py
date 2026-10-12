@@ -3,7 +3,7 @@ from typing import Any
 from fastapi import APIRouter
 
 from amber import repository
-from amber.models import drive_connected
+from amber.models import can_manage_drive_sharing, drive_connected
 from amber.util.security import CurrentUser, DbDep
 
 router = APIRouter(prefix="/api", tags=["me"])
@@ -23,6 +23,7 @@ def me(user: CurrentUser, conn: DbDep) -> dict[str, Any]:
         "role": user["role"],
         "drive": {
             "connected": drive_connected(token is not None, scopes),
+            "can_share": can_manage_drive_sharing(scopes),
             "scopes": sorted(set(scopes.split())),
         },
     }

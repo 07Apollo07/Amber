@@ -7,7 +7,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from amber import repository
-from amber.api.documents import AccessRequest, apply_access, build_access
+from amber.util import drive
+from amber.api.documents import AccessRequest, apply_access, build_access, sync_access_to_drive
 from amber.util.security import CsrfProtected, CurrentUser, DbDep
 
 router = APIRouter(prefix="/api/collections", tags=["collections"], dependencies=[CsrfProtected])
@@ -67,16 +68,32 @@ def share_collection(user: CurrentUser, conn: DbDep, collection_id: uuid.UUID, r
     collection = _owned(conn, user, collection_id)
     access = build_access(user, req.kind, req.emails)
     document_ids = repository.list_collection_document_ids(conn, user["id"], collection_id)
-    for document_id in document_ids:
-        apply_access(conn, document_id, access)
+    documents = [d for d in (repository.get_document(conn, i) for i in document_ids) if d]
+    drive_service = None
+    if any(d["drive_file_id"] for d in documents):
+        drive_service = drive.build_drive_service(user["id"], conn)
+        if drive_service is None:
+            raise HTTPException(status_code=400, detail="Google Drive isn't connected. Reconnect it to change sharing.")
+
+    # Each file is changed in Drive first, then in Amber, so a file Drive refuses keeps its old access in both.
+    updated, failed = 0, []
+    for doc in documents:
+        try:
+            if doc["drive_file_id"]:
+                sync_access_to_drive(drive_service, doc["drive_file_id"], access)
+        except drive.DriveSharingError as exc:
+            failed.append({"title": doc["title"], "error": str(exc)})
+            continue
+        apply_access(conn, doc["id"], access)
+        updated += 1
     repository.insert_audit(
         conn,
         actor_user_id=user["id"],
         actor_email=user["email"],
         action="share_collection",
         target=str(collection_id),
-        detail={"name": collection["name"], "sharing": access[0], "people": len(access[1]) - 1, "documents": len(document_ids)},
+        detail={"name": collection["name"], "sharing": access[0], "people": len(access[1]) - 1, "documents": updated, "failed": len(failed)},
         ip=None,
     )
     conn.commit()
-    return {"success": True, "updated": len(document_ids)}
+    return {"success": True, "updated": updated, "failed": failed}

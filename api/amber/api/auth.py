@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from amber import repository
-from amber.models import drive_connected
+from amber.models import can_manage_drive_sharing, drive_connected
 from amber.util import audit, firebase, google_oauth
 from amber.util.config import Settings
 from amber.util.crypto import decrypt_token, encrypt_token
@@ -219,6 +219,16 @@ def google_callback(
     if tokens["refresh_token"]:
         blob, key_version = encrypt_token(settings, tokens["refresh_token"], aad=str(user["id"]))
         repository.save_token(conn, user["id"], encrypted=blob, key_version=key_version, scopes=tokens["scopes"])
+    elif stored is not None and not can_manage_drive_sharing(stored["scopes"]) and not pending["consent"]:
+        # Signed in before Amber asked for full Drive access. The stored refresh token still carries the old
+        # scope, so ask again with prompt=consent to get a new one. Nothing is saved until that round completes.
+        conn.rollback()
+        response = RedirectResponse(
+            f"/api/auth/google/start?consent=true&return_to={quote(pending['return_to'])}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+        _clear_state(response, settings)
+        return response
     elif stored is not None:
         repository.update_token_scopes(conn, user["id"], tokens["scopes"])  # what the user has granted right now
     elif not pending["consent"]:
