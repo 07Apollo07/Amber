@@ -190,7 +190,7 @@ def google_callback(
     error: str | None = None,
 ) -> Response:
     pending = _read_state(request, settings)
-    if pending is None or state is None or not secrets.compare_digest(state, pending["state"]):
+    if pending is None or state is None or not secrets.compare_digest(state, pending.get("state", "")):
         return _fail(settings, "state")
     if error:
         return _fail(settings, "denied" if error == "access_denied" else "google")
@@ -206,7 +206,6 @@ def google_callback(
     try:
         fb = firebase.sign_in_with_google(settings, tokens["id_token"])
     except SessionInvalid as exc:
-        log.error("Firebase sign-in failed: %s", exc)
         return _fail(settings, "firebase_signin")
 
     user = _upsert_user(conn, settings, identity, fb["uid"])
@@ -236,7 +235,6 @@ def google_callback(
     try:
         session_cookie = firebase.create_session_cookie(settings, fb["id_token"])
     except Exception as exc:
-        # Usually missing or under-privileged Google credentials for Firebase Admin.
         log.error("Creating the Firebase session cookie failed: %s: %s", type(exc).__name__, exc)
         conn.rollback()
         return _fail(settings, "firebase_session")
@@ -252,6 +250,7 @@ def google_callback(
     )
     conn.commit()
 
+    print("SUCCESS: redirecting to return_to:", pending["return_to"])
     response = _same_site_redirect(pending["return_to"])
     set_session_cookies(response, settings, session_cookie)
     _clear_state(response, settings)

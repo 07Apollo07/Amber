@@ -126,15 +126,21 @@ def verified_session(request: Request, settings: Settings, conn: Connection | No
 def current_user(request: Request, settings: SettingsDep) -> dict[str, Any]:
     session_name, _, _ = cookie_names(settings)
     cookie = request.cookies.get(session_name)
+    # print("DEBUG current_user: cookie present:", bool(cookie))
     if not cookie:
+        # print("DEBUG current_user: no cookie found")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in")
 
     with db.connect(settings) as conn:
         _, claims = verified_session(request, settings, conn)
+        # print("DEBUG current_user: claims uid:", claims.get("uid"))
         user = repository.get_user_by_firebase_uid(conn, claims["uid"])
+        # print("DEBUG current_user: db user:", user)
         if user is None:
+            # print("DEBUG current_user: user is None in DB for uid", claims.get("uid"))
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in")
         if user["status"] != "active":
+            # print("DEBUG current_user: user not active:", user["status"])
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Account deactivated")
         return user
 

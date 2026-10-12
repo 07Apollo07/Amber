@@ -83,7 +83,9 @@ def exchange_code(settings: Settings, code: str, code_verifier: str) -> dict[str
 def verify_id_token(settings: Settings, token: str, expected_nonce: str) -> dict[str, Any]:
     """Checks signature, expiry and audience (our client id), then the claims below."""
     try:
-        claims = google_id_token.verify_oauth2_token(token, google_requests.Request(), settings.google_oauth_client_id)
+        claims = google_id_token.verify_oauth2_token(
+            token, google_requests.Request(), settings.google_oauth_client_id, clock_skew_in_seconds=10
+        )
     except ValueError as exc:
         raise OAuthError("invalid_id_token", str(exc)) from exc
     return identity_from_claims(claims, expected_nonce)
