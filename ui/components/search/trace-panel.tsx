@@ -78,6 +78,36 @@ export function TracePanel({ trace, defaultOpen = false }: { trace: Trace; defau
             </table>
           </div>
 
+          {trace.toolCalls && trace.toolCalls.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Tool Executions</div>
+              <div className="space-y-1.5">
+                {trace.toolCalls.map((tool) => (
+                  <div key={tool.id} className="flex items-center justify-between rounded-lg border bg-card/60 px-3 py-2 text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-medium text-foreground">{tool.name}</span>
+                      <span className="text-muted-foreground truncate max-w-[200px]">{tool.args}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {tool.status === "success" && (
+                        <span className="rounded bg-success/15 px-1.5 py-0.5 font-medium text-success">Pass</span>
+                      )}
+                      {tool.status === "failed" && (
+                        <span className="rounded bg-destructive/15 px-1.5 py-0.5 font-medium text-destructive">Fail</span>
+                      )}
+                      {tool.status === "running" && (
+                        <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-medium text-amber-600">Running</span>
+                      )}
+                      {tool.latencyMs && (
+                        <span className="text-muted-foreground tabular-nums">{(tool.latencyMs / 1000).toFixed(1)}s</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {trace.hiddenCount > 0 && (
             <div className="flex items-start gap-2 rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
               <EyeOff className="mt-0.5 size-3.5 shrink-0" />

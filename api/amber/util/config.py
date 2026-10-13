@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     session_days: int = 5
     bootstrap_admin_emails: str = ""  # comma-separated
 
+    # Agent model settings
+    agent_model_name: str = "gemini-2.5-flash"
+    litellm_base_url: str = ""
+    litellm_api_key: SecretStr = SecretStr("")
+
     @property
     def public_origin(self) -> str:
         parts = urlsplit(self.public_base_url)

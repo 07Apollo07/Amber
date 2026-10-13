@@ -3,7 +3,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 
-from amber.api import admin, auth, collections, documents, drive, me
+from amber.api import agent, admin, auth, collections, documents, drive, me
+from amber.agent.graph import create_agent_graph
 from amber.util.config import Settings, get_settings
 from amber.util.firebase import init_firebase
 from amber.util.ratelimit import RateLimited, rate_limited_response
@@ -19,7 +20,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.rate_hits = {}
         if settings.env != "test":  # tests never call Firebase, so they need no Google credentials
             init_firebase(settings)
+
+        dsn = settings.database_dsn.get_secret_value() if settings.database_dsn else None
+        if dsn and settings.env != "test":
+            try:
+                from psycopg_pool import ConnectionPool
+                from langgraph.checkpoint.postgres import PostgresSaver
+
+                connection_kwargs = {"autocommit": True, "prepare_threshold": 0}
+                pool = ConnectionPool(conninfo=dsn, max_size=20, kwargs=connection_kwargs)
+                pool.open()
+                app.state.db_pool = pool
+
+                checkpointer = PostgresSaver(pool)
+                checkpointer.setup()
+                app.state.checkpointer = checkpointer
+                app.state.agent_graph = create_agent_graph(checkpointer=checkpointer, settings=settings)
+            except Exception as e:
+                print(f"Warning: Failed to initialize PostgreSQL checkpointer: {e}")
+                app.state.agent_graph = create_agent_graph(settings=settings)
+        else:
+            app.state.agent_graph = create_agent_graph(settings=settings)
+
         yield
+
+        if hasattr(app.state, "db_pool") and app.state.db_pool:
+            try:
+                app.state.db_pool.close()
+            except Exception:
+                pass
 
     is_prod = settings.env == "prod"
     app = FastAPI(
@@ -51,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(documents.router)
     app.include_router(collections.router)
     app.include_router(drive.router)
+    app.include_router(agent.router)
     return app
 
 

@@ -500,7 +500,7 @@ def hybrid_search_chunks(
     if query_embedding and query_text:
         sql = f"""
         SELECT c.id, c.document_id, c.ord, c.text AS content, c.page,
-               d.title AS document_title, d.source AS document_source, d.source_url, d.file_type,
+               d.title AS document_title, d.origin AS document_source, d.file_type,
                (c.embedding <=> %(query_embedding)s::vector) AS vector_distance,
                ts_rank_cd(c.tsv, plainto_tsquery('english', %(query_text)s)) AS text_rank
           FROM chunks c
@@ -512,7 +512,7 @@ def hybrid_search_chunks(
     elif query_embedding:
         sql = f"""
         SELECT c.id, c.document_id, c.ord, c.text AS content, c.page,
-               d.title AS document_title, d.source AS document_source, d.source_url, d.file_type,
+               d.title AS document_title, d.origin AS document_source, d.file_type,
                (c.embedding <=> %(query_embedding)s::vector) AS vector_distance
           FROM chunks c
           JOIN documents d ON c.document_id = d.id
@@ -523,7 +523,7 @@ def hybrid_search_chunks(
     elif query_text:
         sql = f"""
         SELECT c.id, c.document_id, c.ord, c.text AS content, c.page,
-               d.title AS document_title, d.source AS document_source, d.source_url, d.file_type,
+               d.title AS document_title, d.origin AS document_source, d.file_type,
                ts_rank_cd(c.tsv, plainto_tsquery('english', %(query_text)s)) AS text_rank
           FROM chunks c
           JOIN documents d ON c.document_id = d.id
@@ -535,7 +535,7 @@ def hybrid_search_chunks(
     else:
         sql = f"""
         SELECT c.id, c.document_id, c.ord, c.text AS content, c.page,
-               d.title AS document_title, d.source AS document_source, d.source_url, d.file_type
+               d.title AS document_title, d.origin AS document_source, d.file_type
           FROM chunks c
           JOIN documents d ON c.document_id = d.id
           {where_clause}

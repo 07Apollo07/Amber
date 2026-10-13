@@ -71,11 +71,21 @@ export type TraceChunk = {
   cited: boolean
 }
 
+export type ToolCallTrace = {
+  id: string
+  name: string
+  args: string
+  result?: string
+  status: "success" | "failed" | "running"
+  latencyMs?: number
+}
+
 export type Trace = {
   id: string
   query: string
   rewrittenQuery: string
   chunks: TraceChunk[]
+  toolCalls?: ToolCallTrace[]
   hiddenCount: number
   model: string
   latencyMs: number

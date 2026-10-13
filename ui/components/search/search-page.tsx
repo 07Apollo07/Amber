@@ -22,6 +22,10 @@ export function SearchPage() {
     setPreview(answer.sources.find((s) => s.n === n) ?? null)
   }
 
+  function openSource(source: Source) {
+    setPreview(source)
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -44,7 +48,7 @@ export function SearchPage() {
         <FilterBar filters={filters} onChange={setFilters} />
       </div>
 
-      {mode === "quick" ? <QuickSearch onCite={openCitation} /> : <ChatView onCite={openCitation} />}
+      {mode === "quick" ? <QuickSearch onCite={openCitation} onOpenSource={openSource} /> : <ChatView onCite={openCitation} onOpenSource={openSource} />}
 
       <SourcePreviewSheet source={preview} onClose={() => setPreview(null)} />
     </div>
