@@ -32,14 +32,18 @@ def create_agent_graph(checkpointer=None, settings=None):
     model = get_agent_model(settings).bind_tools(tools)
 
     def call_model(state: MessagesState):
+        print(f"[AGENT_GRAPH] call_model received messages: {state['messages']}")
         system_prompt = SystemMessage(
             content=(
-                "You are Amber AI Assistant. You have access to internal documents via vector search "
-                "and the live internet via web search (SearXNG). Use the tools when needed to answer accurately."
+                "You are Amber AI Assistant, an expert helper specialized in assisting users with their personal and internal documents stored in the vector store. "
+                "Whenever the user asks a question or makes a request, you must PRIMARILY search the vector store first using `vector_search`. "
+                "If the internal documents are insufficient or require additional context, you may then use `web_search` for more info. "
+                "Always prioritize internal document knowledge from the vector store."
             )
         )
         messages = [system_prompt] + state["messages"]
         response = model.invoke(messages)
+        print(f"[AGENT_GRAPH] call_model generated response: {response}")
         return {"messages": [response]}
 
     workflow = StateGraph(MessagesState)

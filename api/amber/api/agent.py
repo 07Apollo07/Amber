@@ -18,6 +18,89 @@ class ChatRequest(BaseModel):
     thread_id: str | None = None
 
 
+def _default_serializer(obj: Any) -> Any:
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if hasattr(obj, "__dict__"):
+        return obj.__dict__
+    return str(obj)
+
+
+def _message_to_dict(message: Any) -> dict:
+    if hasattr(message, "model_dump"):
+        d = message.model_dump()
+    elif hasattr(message, "__dict__"):
+        d = dict(message.__dict__)
+    else:
+        d = {"content": str(message)}
+    if hasattr(message, "type"):
+        d["type"] = message.type
+    return d
+
+
+def _serialize_data(stream_type: str, data: Any) -> str:
+    if stream_type == "messages":
+        if isinstance(data, (list, tuple)) and len(data) == 2:
+            message, metadata = data
+            return json.dumps([_message_to_dict(message), metadata], default=_default_serializer)
+    return json.dumps(data, default=_default_serializer)
+
+
+@router.post("/v2/stream")
+async def stream_agent_v2(request: Request, body: ChatRequest, user: CurrentUser) -> StreamingResponse:
+    """Stream chat responses following the official LangGraph v2 protocol with Postgres checkpointing."""
+    graph = getattr(request.app.state, "agent_graph", None)
+    if not graph:
+        graph = create_agent_graph()
+
+    thread_id = body.thread_id or str(uuid.uuid4())
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "metadata": {"user_email": user["email"]}
+    }
+
+    async def sse_generator():
+        print(f"[SSE_V2] Starting stream for thread_id={thread_id}, message={body.message!r}")
+        yield f"event: metadata\ndata: {json.dumps({'thread_id': thread_id})}\n\n"
+        try:
+            async for chunk in graph.astream(
+                {"messages": [("user", body.message)]},
+                config=config,
+                stream_mode=["values", "messages", "updates", "custom"],
+                version="v2",
+            ):
+                stream_type = chunk.get("type", "unknown")
+                ns = chunk.get("ns", ())
+                data = chunk.get("data")
+
+                if ns:
+                    event_name = f"{stream_type}|{'|'.join(ns)}"
+                else:
+                    event_name = stream_type
+
+                print(f"[SSE_V2] Chunk type={stream_type}, event_name={event_name}, data={data}")
+                serialized_data = _serialize_data(stream_type, data)
+                print(f"[SSE_V2] Yielding serialized_data={serialized_data[:200]}...")
+                yield f"event: {event_name}\ndata: {serialized_data}\n\n"
+            print("[SSE_V2] Stream completed successfully, yielding [DONE]")
+            yield "event: end\ndata: [DONE]\n\n"
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[SSE_V2] Error during streaming: {e}\n{tb}")
+            yield f"event: error\ndata: {json.dumps({'error': str(e), 'traceback': tb})}\n\n"
+
+    return StreamingResponse(
+        sse_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        },
+    )
+
+
 @router.post("/chat")
 def chat_agent(request: Request, body: ChatRequest, user: CurrentUser) -> StreamingResponse:
     """Stream chat responses from the LangGraph agent with conversation state stored in Postgres."""

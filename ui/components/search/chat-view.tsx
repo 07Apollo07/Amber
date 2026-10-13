@@ -192,7 +192,7 @@ export function ChatView({
       setTraceOpen(true)
 
       try {
-        const res = await apiPost("/api/agent/chat", {
+        const res = await apiPost("/api/agent/v2/stream", {
           message: text,
           thread_id: activeId,
         })
@@ -200,82 +200,82 @@ export function ChatView({
         const reader = res.body?.getReader()
         const decoder = new TextDecoder()
         let accumulatedText = ""
+        let currentEvent = ""
 
         if (reader) {
+          let buffer = ""
           while (true) {
             const { value, done } = await reader.read()
             if (done) break
-            const chunk = decoder.decode(value, { stream: true })
-            const lines = chunk.split("\n")
+            buffer += decoder.decode(value, { stream: true })
+            const lines = buffer.split("\n")
+            buffer = lines.pop() || ""
+
             for (const line of lines) {
-              if (line.startsWith("data: ")) {
+              if (line.startsWith("event: ")) {
+                currentEvent = line.slice(7).trim()
+              } else if (line.startsWith("data: ")) {
                 const jsonStr = line.slice(6).trim()
                 if (jsonStr === "[DONE]") break
                 try {
                   const parsed = JSON.parse(jsonStr)
-                  if (parsed.thread_id && !activeId) {
+
+                  if (currentEvent.startsWith("metadata") && parsed.thread_id && !activeId) {
                     setActiveId(parsed.thread_id)
                   }
-                
-                  // Handle tool calls
-                  if (parsed.type === "tool_call") {
-                    setToolCalls((prev) => [...prev, {
-                      id: parsed.id,
-                      name: parsed.name,
-                      args: parsed.args,
-                      status: parsed.status,
-                      latencyMs: parsed.latencyMs
-                    }])
-                  }
-                
-                  // Handle tool results
-                  if (parsed.type === "tool_result") {
-                    const toolCallId = parsed.tool_call_id
-                    setToolResults((prev) => ({ ...prev, [toolCallId]: parsed.result }))
-                    setToolCalls((prev) => prev.map((tc) => 
-                      tc.id === toolCallId 
-                        ? { ...tc, result: parsed.result, status: "success" as const }
-                        : tc
-                    ))
-                  }
-                
-                  // Handle tool calls complete
-                  if (parsed.type === "tool_calls_complete") {
-                    setToolCalls(parsed.tool_calls)
-                  }
-                
-                  // Handle tool results complete
-                  if (parsed.type === "tool_results_complete") {
-                    const resultsMap: Record<string, string> = {}
-                    parsed.tool_results.forEach((tr: any) => {
-                      resultsMap[tr.tool_call_id] = tr.result
-                    })
-                    setToolResults(resultsMap)
-                    setToolCalls((prev) => prev.map((tc) => ({
-                      ...tc,
-                      result: resultsMap[tc.id],
-                      status: "success" as const
-                    })))
-                  }
-                
-                  if (parsed.content) {
-                    accumulatedText += parsed.content
-                    setMessages((m) => {
-                      const copy = [...m]
-                      const last = copy[copy.length - 1]
-                      if (last && last.role === "assistant") {
-                        copy[copy.length - 1] = {
-                          ...last,
-                          answer: {
-                            ...last.answer!,
-                            markdown: accumulatedText,
+
+                  // Handle LangGraph v2 "messages" stream mode (namespaced e.g. messages|agent)
+                  if (currentEvent.includes("messages") && Array.isArray(parsed) && parsed.length > 0) {
+                    const msg = parsed[0]
+                    const content = msg?.content || msg?.kwargs?.content
+                    const msgType = msg?.type || msg?.id || ""
+                    if (content && typeof content === "string" && (typeof msgType === "string" && (msgType.includes("AI") || msgType === "ai" || msgType === "AIMessageChunk"))) {
+                      accumulatedText += content
+                      setMessages((m) => {
+                        const copy = [...m]
+                        const last = copy[copy.length - 1]
+                        if (last && last.role === "assistant") {
+                          copy[copy.length - 1] = {
+                            ...last,
+                            answer: {
+                              ...last.answer!,
+                              markdown: accumulatedText,
+                            }
                           }
                         }
-                      }
-                      return copy
-                    })
+                        return copy
+                      })
+                    }
                   }
-                  if (parsed.error) {
+
+                  // Handle LangGraph v2 "values" or "updates" stream modes
+                  if (currentEvent.includes("values") || currentEvent.includes("updates")) {
+                    const rawMessages = parsed?.messages || (parsed?.agent && parsed.agent.messages)
+                    if (Array.isArray(rawMessages) && rawMessages.length > 0) {
+                      const lastMsg = rawMessages[rawMessages.length - 1]
+                      const content = lastMsg?.content || lastMsg?.kwargs?.content
+                      const msgType = lastMsg?.type || lastMsg?.role || ""
+                      if (content && typeof content === "string" && (msgType.includes("AI") || msgType === "ai" || msgType === "AIMessage" || msgType === "assistant")) {
+                        accumulatedText = content
+                        setMessages((m) => {
+                          const copy = [...m]
+                          const last = copy[copy.length - 1]
+                          if (last && last.role === "assistant") {
+                            copy[copy.length - 1] = {
+                              ...last,
+                              answer: {
+                                ...last.answer!,
+                                markdown: accumulatedText,
+                              }
+                            }
+                          }
+                          return copy
+                        })
+                      }
+                    }
+                  }
+
+                  if (currentEvent.includes("error") && parsed.error) {
                     accumulatedText += `\n[Error: ${parsed.error}]`
                     setMessages((m) => {
                       const copy = [...m]
@@ -293,7 +293,7 @@ export function ChatView({
                     })
                   }
                 } catch (e) {
-                  // ignore
+                  // ignore JSON parse errors on intermediate text chunks
                 }
               }
             }

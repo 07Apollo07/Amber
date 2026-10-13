@@ -9,6 +9,11 @@ def test_agent_chat_unauthenticated(client: TestClient) -> None:
     assert resp.status_code in (401, 403)
 
 
+def test_agent_v2_stream_unauthenticated(client: TestClient) -> None:
+    resp = client.post("/api/agent/v2/stream", json={"message": "Hello"})
+    assert resp.status_code in (401, 403)
+
+
 def test_get_conversation_unauthenticated(client: TestClient) -> None:
     resp = client.get("/api/agent/conversations/some-thread-id")
     assert resp.status_code in (401, 403)
