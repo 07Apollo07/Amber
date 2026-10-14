@@ -14,7 +14,7 @@ WEB_SA="amber-web@$PROJECT_ID.iam.gserviceaccount.com"
 WEB_URL="https://amber-web-$PROJECT_NUMBER.$REGION.run.app"
 API_URL="https://amber-api-$PROJECT_NUMBER.$REGION.run.app"
 KMS_KEY="projects/$PROJECT_ID/locations/$REGION/keyRings/amber/cryptoKeys/oauth-tokens"
-SECRETS=(amber-oauth-client-secret amber-firebase-web-api-key amber-gemini-api-key amber-state-cookie-key amber-database-dsn)
+SECRETS=(amber-oauth-client-secret amber-firebase-web-api-key amber-gemini-api-key amber-state-cookie-key amber-database-dsn amber-litellm-api-key)
 
 setup() {  # one time
   gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
@@ -73,12 +73,14 @@ AMBER_TOKEN_KMS_KEY: "$KMS_KEY"
 AMBER_BOOTSTRAP_ADMIN_EMAILS: "${BOOTSTRAP_ADMIN_EMAILS:-}"
 AMBER_PICKER_API_KEY: "${PICKER_API_KEY:-}"
 AMBER_GOOGLE_CLOUD_PROJECT_NUMBER: "$PROJECT_NUMBER"
+AMBER_AGENT_MODEL_NAME: "${AGENT_MODEL_NAME:-gemini-2.5-flash}"
+AMBER_LITELLM_BASE_URL: "${LITELLM_BASE_URL:-}"
 YAML
   gcloud run deploy amber-api --image "$REPO/api:$tag" --region "$REGION" --service-account "$API_SA" \
     --allow-unauthenticated --ingress all --add-cloudsql-instances "$PROJECT_ID:$REGION:$SQL_INSTANCE" \
     --memory 1Gi --cpu 1 --timeout 300 --concurrency 10 --min-instances 0 --max-instances 3 --port 8000 \
     --env-vars-file "$envfile" \
-    --set-secrets "AMBER_GOOGLE_OAUTH_CLIENT_SECRET=amber-oauth-client-secret:latest,AMBER_FIREBASE_WEB_API_KEY=amber-firebase-web-api-key:latest,AMBER_GEMINI_API_KEY=amber-gemini-api-key:latest,AMBER_STATE_COOKIE_KEY=amber-state-cookie-key:latest,AMBER_DATABASE_DSN=amber-database-dsn:latest"
+    --set-secrets "AMBER_GOOGLE_OAUTH_CLIENT_SECRET=amber-oauth-client-secret:latest,AMBER_FIREBASE_WEB_API_KEY=amber-firebase-web-api-key:latest,AMBER_GEMINI_API_KEY=amber-gemini-api-key:latest,AMBER_STATE_COOKIE_KEY=amber-state-cookie-key:latest,AMBER_DATABASE_DSN=amber-database-dsn:latest,AMBER_LITELLM_API_KEY=amber-litellm-api-key:latest"
   gcloud run deploy amber-web --image "$REPO/web:$tag" --region "$REGION" --service-account "$WEB_SA" \
     --allow-unauthenticated --memory 512Mi --min-instances 0 --max-instances 3 --port 3000 \
     --set-env-vars "AMBER_API_ORIGIN=$API_URL"
