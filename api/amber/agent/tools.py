@@ -31,7 +31,20 @@ def vector_search(query: str, user_email: str = "system@amber.local") -> str:
     for r in results:
         content = r.get("content", "")
         doc_id = r.get("document_id", "unknown")
-        formatted.append(f"[Internal Doc {doc_id}]: {content}")
+        doc_title = r.get("document_title", "Untitled")
+        file_type = r.get("file_type", "unknown")
+        page = r.get("page")
+        drive_file_id = r.get("drive_file_id")
+        drive_url = f"https://drive.google.com/file/d/{drive_file_id}/view" if drive_file_id else None
+
+        source_header = f"[Source: {doc_title} (ID: {doc_id}, Type: {file_type}"
+        if page is not None:
+            source_header += f", Page: {page}"
+        if drive_url:
+            source_header += f", Drive Link: {drive_url}"
+        source_header += "]"
+
+        formatted.append(f"{source_header}\n{content}")
     return "\n\n".join(formatted)
 
 

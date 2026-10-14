@@ -97,6 +97,7 @@ export type Answer = {
   markdown: string
   sources: Source[]
   trace: Trace
+  toolCalls?: ToolCallTrace[]
 }
 
 export type ChatMessage =

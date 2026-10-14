@@ -14,6 +14,7 @@ import type { Answer, ChatMessage, Conversation, ToolCallTrace, TraceChunk, Sour
 import { cn } from "@/lib/utils"
 
 import { AnswerBlock } from "./answer-block"
+import { ToolElement } from "./tool-element"
 
 function ConversationList({
   conversations,
@@ -119,33 +120,109 @@ export function ChatView({
         const res = await fetch(`/api/agent/conversations/${activeId}`)
         if (res.ok) {
           const data = await res.json()
-          const loaded: ChatMessage[] = (data.messages || []).map((m: any, idx: number) => {
-            const isUser = m.role === "user" || m.role === "human"
-            const content = m.content || ""
+          const rawMessages = data.messages || []
+          const loaded: ChatMessage[] = []
+          
+          let currentToolCalls: ToolCallTrace[] = []
+          let pendingAssistantMarkdown = ""
+
+          for (let idx = 0; idx < rawMessages.length; idx++) {
+            const m = rawMessages[idx]
+            const role = m.role || m.type || ""
+            const isUser = role === "user" || role === "human"
+            const content = m.content || m.kwargs?.content || ""
+
             if (isUser) {
-              return { id: `msg-${idx}`, role: "user" as const, text: content }
-            } else {
-              return {
-                id: `msg-${idx}`,
-                role: "assistant" as const,
-                answer: {
-                  markdown: content,
-                  sources: [],
-                  trace: {
-                    id: `trace-${idx}`,
-                    query: "",
-                    rewrittenQuery: "",
-                    chunks: [],
-                    hiddenCount: 0,
-                    model: "gemini-3.5-flash-lite",
-                    latencyMs: 0,
-                    promptTokens: 0,
-                    completionTokens: 0,
+              // Flush any accumulated assistant turn before starting a user turn
+              if (pendingAssistantMarkdown || currentToolCalls.length > 0) {
+                loaded.push({
+                  id: `msg-asst-${idx}`,
+                  role: "assistant",
+                  answer: {
+                    markdown: pendingAssistantMarkdown,
+                    sources: [],
+                    toolCalls: [...currentToolCalls],
+                    trace: {
+                      id: `trace-${idx}`,
+                      query: "",
+                      rewrittenQuery: "",
+                      chunks: [],
+                      hiddenCount: 0,
+                      model: "gemini-3.5-flash-lite",
+                      latencyMs: 0,
+                      promptTokens: 0,
+                      completionTokens: 0,
+                    }
                   }
+                })
+                pendingAssistantMarkdown = ""
+                currentToolCalls = []
+              }
+              loaded.push({ id: `msg-user-${idx}`, role: "user", text: content })
+            } else {
+              // Assistant / AI / Tool message
+              const toolCallsList = m.tool_calls || m.kwargs?.tool_calls
+              const toolCallId = m.tool_call_id || m.kwargs?.tool_call_id
+              const isToolResult = role.includes("tool") || role === "ToolMessage" || toolCallId
+
+              if (toolCallsList && Array.isArray(toolCallsList)) {
+                for (const tc of toolCallsList) {
+                  const tcId = tc.id || tc.args?.id || crypto.randomUUID()
+                  const tcName = tc.name || tc.type || "unknown_tool"
+                  const tcArgs = tc.args ? (typeof tc.args === "string" ? tc.args : JSON.stringify(tc.args, null, 2)) : "{}"
+                  currentToolCalls.push({
+                    id: tcId,
+                    name: tcName,
+                    args: tcArgs,
+                    status: "running"
+                  })
                 }
               }
+
+              if (isToolResult) {
+                const matchingId = toolCallId || (toolCallsList && toolCallsList[0]?.id)
+                const targetTc = matchingId 
+                  ? currentToolCalls.find(t => t.id === matchingId)
+                  : currentToolCalls.find(t => t.status === "running")
+                
+                if (targetTc) {
+                  targetTc.result = content
+                  targetTc.status = "success"
+                } else if (currentToolCalls.length > 0) {
+                  currentToolCalls[currentToolCalls.length - 1].result = content
+                  currentToolCalls[currentToolCalls.length - 1].status = "success"
+                }
+              }
+
+              if (content && !isToolResult && !role.includes("tool")) {
+                pendingAssistantMarkdown = content
+              }
             }
-          })
+          }
+
+          if (pendingAssistantMarkdown || currentToolCalls.length > 0) {
+            loaded.push({
+              id: `msg-asst-final`,
+              role: "assistant",
+              answer: {
+                markdown: pendingAssistantMarkdown,
+                sources: [],
+                toolCalls: [...currentToolCalls],
+                trace: {
+                  id: `trace-final`,
+                  query: "",
+                  rewrittenQuery: "",
+                  chunks: [],
+                  hiddenCount: 0,
+                  model: "gemini-3.5-flash-lite",
+                  latencyMs: 0,
+                  promptTokens: 0,
+                  completionTokens: 0,
+                }
+              }
+            })
+          }
+
           setMessages(loaded)
         }
       } catch (e) {
@@ -187,9 +264,106 @@ export function ChatView({
     ])
     setDraft("")
     setLoading(true)
-      setToolCalls([])
-      setToolResults({})
-      setTraceOpen(true)
+
+    const processMessages = (msgs: any[]) => {
+      if (!Array.isArray(msgs)) return
+      for (const msg of msgs) {
+        if (!msg) continue
+        const msgType = msg.type || msg.role || msg.id || ""
+        const toolCallsList = msg.tool_calls || msg.kwargs?.tool_calls
+        const toolCallId = msg.tool_call_id || msg.kwargs?.tool_call_id
+        const toolName = msg.name || msg.kwargs?.name
+
+        // 1. Tool calls in AI messages
+        if (toolCallsList && Array.isArray(toolCallsList)) {
+          for (const tc of toolCallsList) {
+            const tcId = tc.id || tc.args?.id || crypto.randomUUID()
+            const tcName = tc.name || tc.type || "unknown_tool"
+            const tcArgs = tc.args ? (typeof tc.args === "string" ? tc.args : JSON.stringify(tc.args, null, 2)) : "{}"
+
+            setToolCalls((prev) => {
+              const exists = prev.find((t) => t.id === tcId)
+              if (exists) {
+                return prev.map((t) => (t.id === tcId ? { ...t, args: tcArgs, name: tcName } : t))
+              }
+              return [...prev, { id: tcId, name: tcName, args: tcArgs, status: "running" }]
+            })
+
+            // Immediately update assistant message toolCalls inline
+            setMessages((m) => {
+              const copy = [...m]
+              const last = copy[copy.length - 1]
+              if (last && last.role === "assistant") {
+                const existingTools = last.answer?.toolCalls || []
+                const found = existingTools.find(t => t.id === tcId)
+                const updatedTools = found
+                  ? existingTools.map(t => t.id === tcId ? { ...t, args: tcArgs, name: tcName } : t)
+                  : [...existingTools, { id: tcId, name: tcName, args: tcArgs, status: "running" as const }]
+                copy[copy.length - 1] = {
+                  ...last,
+                  answer: {
+                    ...last.answer!,
+                    toolCalls: updatedTools,
+                  }
+                }
+              }
+              return copy
+            })
+          }
+        }
+
+        // 2. Tool results
+        if (msgType.includes("tool") || msgType === "ToolMessage" || toolCallId) {
+          const resultText = msg.content || msg.kwargs?.content || ""
+          const matchingId = toolCallId || (toolCallsList && toolCallsList[0]?.id)
+
+          if (matchingId) {
+            setToolCalls((prev) =>
+              prev.map((t) => (t.id === matchingId ? { ...t, result: resultText, status: "success" } : t))
+            )
+            setMessages((m) => {
+              const copy = [...m]
+              const last = copy[copy.length - 1]
+              if (last && last.role === "assistant" && last.answer?.toolCalls) {
+                copy[copy.length - 1] = {
+                  ...last,
+                  answer: {
+                    ...last.answer!,
+                    toolCalls: last.answer.toolCalls.map(t => t.id === matchingId ? { ...t, result: resultText, status: "success" as const } : t)
+                  }
+                }
+              }
+              return copy
+            })
+          } else if (toolName) {
+            setToolCalls((prev) => {
+              const lastRunning = [...prev].reverse().find((t) => t.name === toolName && t.status === "running")
+              if (lastRunning) {
+                return prev.map((t) => (t.id === lastRunning.id ? { ...t, result: resultText, status: "success" } : t))
+              }
+              return prev
+            })
+            setMessages((m) => {
+              const copy = [...m]
+              const last = copy[copy.length - 1]
+              if (last && last.role === "assistant" && last.answer?.toolCalls) {
+                const lastRunning = [...last.answer.toolCalls].reverse().find(t => t.name === toolName && t.status === "running")
+                if (lastRunning) {
+                  copy[copy.length - 1] = {
+                    ...last,
+                    answer: {
+                      ...last.answer!,
+                      toolCalls: last.answer.toolCalls.map(t => t.id === lastRunning.id ? { ...t, result: resultText, status: "success" as const } : t)
+                    }
+                  }
+                }
+              }
+              return copy
+            })
+          }
+        }
+      }
+    }
 
       try {
         const res = await apiPost("/api/agent/v2/stream", {
@@ -224,8 +398,27 @@ export function ChatView({
                     setActiveId(parsed.thread_id)
                   }
 
-                  // Handle LangGraph v2 "messages" stream mode (namespaced e.g. messages|agent)
+                  // Handle custom tool events
+                  if (currentEvent === "tool_call" || parsed.type === "tool_call") {
+                    const tc = parsed
+                    const tcId = tc.id || tc.tool_call_id || crypto.randomUUID()
+                    setToolCalls((prev) => {
+                      const exists = prev.find((t) => t.id === tcId)
+                      if (exists) return prev
+                      return [...prev, { id: tcId, name: tc.name, args: tc.args || "{}", status: tc.status || "running" }]
+                    })
+                  }
+                  if (currentEvent === "tool_result" || parsed.type === "tool_result") {
+                    const tr = parsed
+                    const trId = tr.tool_call_id || tr.id
+                    setToolCalls((prev) =>
+                      prev.map((t) => (t.id === trId || t.name === tr.name ? { ...t, result: tr.result, status: "success" } : t))
+                    )
+                  }
+
+                  // Handle LangGraph v2 "messages" stream mode
                   if (currentEvent.includes("messages") && Array.isArray(parsed) && parsed.length > 0) {
+                    processMessages([parsed[0]])
                     const msg = parsed[0]
                     const content = msg?.content || msg?.kwargs?.content
                     const msgType = msg?.type || msg?.id || ""
@@ -240,6 +433,7 @@ export function ChatView({
                             answer: {
                               ...last.answer!,
                               markdown: accumulatedText,
+                              toolCalls: toolCalls.length > 0 ? [...toolCalls] : last.answer?.toolCalls,
                             }
                           }
                         }
@@ -250,8 +444,9 @@ export function ChatView({
 
                   // Handle LangGraph v2 "values" or "updates" stream modes
                   if (currentEvent.includes("values") || currentEvent.includes("updates")) {
-                    const rawMessages = parsed?.messages || (parsed?.agent && parsed.agent.messages)
+                    const rawMessages = parsed?.messages || (parsed?.agent && parsed.agent.messages) || (parsed?.tools && parsed.tools.messages)
                     if (Array.isArray(rawMessages) && rawMessages.length > 0) {
+                      processMessages(rawMessages)
                       const lastMsg = rawMessages[rawMessages.length - 1]
                       const content = lastMsg?.content || lastMsg?.kwargs?.content
                       const msgType = lastMsg?.type || lastMsg?.role || ""
@@ -266,6 +461,7 @@ export function ChatView({
                               answer: {
                                 ...last.answer!,
                                 markdown: accumulatedText,
+                                toolCalls: toolCalls.length > 0 ? [...toolCalls] : last.answer?.toolCalls,
                               }
                             }
                           }
@@ -339,71 +535,10 @@ export function ChatView({
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border bg-card/40">
-              {/* Chat header with trace button (desktop) */}
-              <div className="hidden lg:flex items-center justify-between border-b px-3 py-2">
-                <div className="flex items-center gap-2">
-                  <AmberMark className="size-5" />
-                  <span className="font-medium">Chat</span>
-                </div>
-                {(toolCalls.length > 0 || traceOpen) && (
-                  <Button variant="ghost" size="icon" onClick={() => setTraceOpen(!traceOpen)} className="gap-1">
-                    <ChevronDown className={cn("size-4 transition-transform", traceOpen && "rotate-180")} />
-                    <span className="text-xs">Trace</span>
-                  </Button>
-                )}
-              </div>
-        
-              {/* Tool Calls Trace Panel - right sidebar (desktop) */}
-          <div className="hidden lg:block w-72 border-l bg-muted/20" style={{ display: (toolCalls.length > 0 || traceOpen) ? 'flex' : 'none' }}>
-            <div className="p-3 border-b flex items-center justify-between">
-              <h3 className="font-medium text-sm">Trace</h3>
-              <Button variant="ghost" size="icon-xs" onClick={() => setTraceOpen(!traceOpen)}>
-                <ChevronDown className={cn("size-4 transition-transform", traceOpen && "rotate-180")} />
-              </Button>
-            </div>
-            {traceOpen && (
-                          <div className="p-3 max-h-[calc(100%-50px)] overflow-y-auto space-y-3">
-                {toolCalls.length > 0 && (
-                  <div className="space-y-2">
-                    <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Tool Executions</div>
-                    {toolCalls.map((tool) => (
-                      <div key={tool.id} className="space-y-1 rounded-lg border bg-card/60 p-2 text-xs">
-                        <div className="flex items-center justify-between">
-                          <span className="font-mono font-medium text-foreground">{tool.name}</span>
-                          <div className="flex items-center gap-1">
-                            {tool.status === "success" && (
-                              <span className="rounded bg-success/15 px-1.5 py-0.5 font-medium text-success">Pass</span>
-                            )}
-                            {tool.status === "failed" && (
-                              <span className="rounded bg-destructive/15 px-1.5 py-0.5 font-medium text-destructive">Fail</span>
-                            )}
-                            {tool.status === "running" && (
-                              <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-medium text-amber-600">Running</span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="mt-1 text-muted-foreground font-mono text-[11px] truncate">{tool.args}</div>
-                        {tool.result && (
-                          <Collapsible defaultOpen={false}>
-                            <CollapsibleTrigger className="mt-1 text-xs text-primary hover:underline cursor-pointer">
-                              Show result
-                            </CollapsibleTrigger>
-                            <CollapsibleContent className="mt-1">
-                              <pre className="bg-muted p-2 rounded text-[10px] overflow-x-auto max-h-40">{tool.result}</pre>
-                            </CollapsibleContent>
-                          </Collapsible>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        <div className="flex items-center gap-2 border-b px-3 py-2 lg:hidden">
+        <div className="flex items-center gap-2 border-b px-3 py-2">
           <Sheet open={drawerOpen} onOpenChange={setDrawerOpen}>
             <SheetTrigger asChild>
-              <Button variant="ghost" size="sm">
+              <Button variant="ghost" size="sm" className="lg:hidden">
                 <PanelLeft /> Conversations
               </Button>
             </SheetTrigger>
@@ -420,58 +555,11 @@ export function ChatView({
               />
             </SheetContent>
           </Sheet>
-                  {(toolCalls.length > 0 || traceOpen) && (
-                    <Sheet open={traceSheetOpen} onOpenChange={setTraceSheetOpen}>
-                      <SheetTrigger asChild>
-                        <Button variant="ghost" size="sm" className="gap-1">
-                          <ChevronDown className="size-4" />
-                          Trace
-                        </Button>
-                      </SheetTrigger>
-                      <SheetContent side="right" className="w-72 p-4">
-                        <SheetHeader className="p-0">
-                          <SheetTitle>Trace</SheetTitle>
-                        </SheetHeader>
-                                                <div className="space-y-3 max-h-[60vh] overflow-y-auto">
-                          {toolCalls.length > 0 && (
-                            <div className="space-y-2">
-                              <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Tool Executions</div>
-                              {toolCalls.map((tool) => (
-                                <div key={tool.id} className="space-y-1 rounded-lg border bg-card/60 p-2 text-xs">
-                                  <div className="flex items-center justify-between">
-                                    <span className="font-mono font-medium text-foreground">{tool.name}</span>
-                                    <div className="flex items-center gap-1">
-                                      {tool.status === "success" && (
-                                        <span className="rounded bg-success/15 px-1.5 py-0.5 font-medium text-success">Pass</span>
-                                      )}
-                                      {tool.status === "failed" && (
-                                        <span className="rounded bg-destructive/15 px-1.5 py-0.5 font-medium text-destructive">Fail</span>
-                                      )}
-                                      {tool.status === "running" && (
-                                        <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-medium text-amber-600">Running</span>
-                                      )}
-                                    </div>
-                                  </div>
-                                  <div className="mt-1 text-muted-foreground font-mono text-[11px] truncate">{tool.args}</div>
-                                  {tool.result && (
-                                    <Collapsible defaultOpen={false}>
-                                      <CollapsibleTrigger className="mt-1 text-xs text-primary hover:underline cursor-pointer">
-                                        Show result
-                                      </CollapsibleTrigger>
-                                      <CollapsibleContent className="mt-1">
-                                        <pre className="bg-muted p-2 rounded text-[10px] overflow-x-auto max-h-40">{tool.result}</pre>
-                                      </CollapsibleContent>
-                                    </Collapsible>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </SheetContent>
-                    </Sheet>
-                  )}
-                </div>
+          <div className="flex items-center gap-2">
+            <AmberMark className="size-5" />
+            <span className="font-medium">Chat</span>
+          </div>
+        </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
           {messages.length === 0 ? (

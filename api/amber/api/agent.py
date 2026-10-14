@@ -234,9 +234,8 @@ def get_conversation(request: Request, thread_id: str, user: CurrentUser) -> dic
         if state and state.values:
             raw_messages = state.values.get("messages", [])
             for msg in raw_messages:
-                role = getattr(msg, "type", "unknown")
-                content = getattr(msg, "content", str(msg))
-                messages.append({"role": role, "content": content})
+                msg_dict = _message_to_dict(msg)
+                messages.append(msg_dict)
         return {"thread_id": thread_id, "messages": messages}
     except Exception as e:
         return {"thread_id": thread_id, "messages": [], "error": str(e)}

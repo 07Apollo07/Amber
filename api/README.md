@@ -43,6 +43,21 @@ Then run the web app (`ui`, `pnpm dev`) and open http://localhost:3000. The web 
 
 Over plain-http localhost, cookies drop the `__Host-` prefix because browsers only accept it over https. They are still Secure, HttpOnly and SameSite.
 
+## Docker Compose
+
+From the `api` folder, start the API with:
+
+```bash
+docker compose up --build
+```
+
+Set `GOOGLE_APPLICATION_CREDENTIALS` in `.env` to the service-account key's filename in
+`api/`. Compose mounts that file read-only at `/run/secrets/google-credentials.json`; it is not
+copied into the image. The API's `AMBER_DATABASE_DSN` must point to a database reachable from
+the container. For a database running on the host, use `host.docker.internal` instead of
+`127.0.0.1` in the DSN. This Compose setup runs only the API; it does not create a database or
+initialize its schema.
+
 ## Tests
 
 ```bash
