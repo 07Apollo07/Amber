@@ -720,6 +720,19 @@ def create_conversation(conn: Connection, user_id: uuid.UUID, title: str | None 
     return row
 
 
+def ensure_agent_conversation(conn: Connection, conversation_id: uuid.UUID, user_id: uuid.UUID) -> Row | None:
+    execute(
+        conn,
+        """
+        INSERT INTO conversations (id, user_id, title)
+        VALUES (%(id)s, %(user_id)s, 'New Conversation')
+        ON CONFLICT (id) DO NOTHING
+        """,
+        {"id": conversation_id, "user_id": user_id},
+    )
+    return get_conversation(conn, conversation_id, user_id)
+
+
 def get_conversation(conn: Connection, conversation_id: uuid.UUID, user_id: uuid.UUID) -> Row | None:
     return fetch_one(
         conn,
@@ -728,10 +741,20 @@ def get_conversation(conn: Connection, conversation_id: uuid.UUID, user_id: uuid
     )
 
 
-def list_conversations_for_user(conn: Connection, user_id: uuid.UUID, limit: int = 50, offset: int = 0) -> list[Row]:
+def list_conversations_for_user(
+    conn: Connection,
+    user_id: uuid.UUID,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[Row]:
     return fetch_all(
         conn,
-        "SELECT * FROM conversations WHERE user_id = %(user_id)s ORDER BY updated_at DESC LIMIT %(limit)s OFFSET %(offset)s",
+        """
+        SELECT * FROM conversations
+         WHERE user_id = %(user_id)s
+         ORDER BY updated_at DESC
+         LIMIT %(limit)s OFFSET %(offset)s
+        """,
         {"user_id": user_id, "limit": limit, "offset": offset},
     )
 

@@ -1,14 +1,17 @@
 """Agent chat API endpoint with LangGraph state persistence in PostgreSQL."""
 
 import json
+import inspect
 import uuid
 from typing import Any
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from langchain_core.messages import HumanMessage, SystemMessage
+from pydantic import BaseModel, Field
 
-from amber.agent.graph import create_agent_graph
-from amber.util.security import CurrentUser
+from amber import repository
+from amber.agent.graph import create_agent_graph, get_agent_model
+from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -16,6 +19,10 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 class ChatRequest(BaseModel):
     message: str
     thread_id: str | None = None
+
+
+class ConversationName(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
 
 
 def _default_serializer(obj: Any) -> Any:
@@ -47,13 +54,27 @@ def _serialize_data(stream_type: str, data: Any) -> str:
 
 
 @router.post("/v2/stream")
-async def stream_agent_v2(request: Request, body: ChatRequest, user: CurrentUser) -> StreamingResponse:
+async def stream_agent_v2(
+    request: Request,
+    body: ChatRequest,
+    user: CurrentUser,
+    conn: DbDep,
+) -> StreamingResponse:
     """Stream chat responses following the official LangGraph v2 protocol with Postgres checkpointing."""
     graph = getattr(request.app.state, "agent_graph", None)
     if not graph:
         graph = create_agent_graph()
 
     thread_id = body.thread_id or str(uuid.uuid4())
+    try:
+        conversation_id = uuid.UUID(thread_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid conversation ID") from None
+    conversation = repository.ensure_agent_conversation(conn, conversation_id, user["id"])
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conn.commit()
+
     config = {
         "configurable": {"thread_id": thread_id},
         "metadata": {"user_email": user["email"]}
@@ -187,47 +208,39 @@ def chat_agent(request: Request, body: ChatRequest, user: CurrentUser) -> Stream
 
 
 @router.get("/conversations")
-def list_conversations(request: Request, user: CurrentUser) -> list[dict[str, Any]]:
-    """List recent conversations for the current user from Postgres checkpoints."""
-    graph = getattr(request.app.state, "agent_graph", None)
-    if not graph or not graph.checkpointer:
-        return []
-
-    conversations = {}
-    try:
-        for c in graph.checkpointer.list(None):
-            thread_id = c.config["configurable"].get("thread_id")
-            if not thread_id:
-                continue
-
-            title = "New Conversation"
-            if c.checkpoint and "channel_values" in c.checkpoint:
-                messages = c.checkpoint["channel_values"].get("messages", [])
-                for msg in messages:
-                    content = getattr(msg, "content", None)
-                    if content:
-                        title = content[:40] + ("..." if len(content) > 40 else "")
-                        break
-
-            conversations[thread_id] = {
-                "id": thread_id,
-                "title": title,
-                "updatedAt": "Recent"
-            }
-    except Exception:
-        pass
-
-    return list(conversations.values())
+def list_conversations(
+    user: CurrentUser,
+    conn: DbDep,
+) -> list[dict[str, Any]]:
+    """List the current user's agent conversations."""
+    conversations = repository.list_conversations_for_user(conn, user["id"])
+    return [
+        {
+            "id": str(conversation["id"]),
+            "title": conversation["title"],
+            "updatedAt": conversation["updated_at"].isoformat(),
+        }
+        for conversation in conversations
+    ]
 
 
 @router.get("/conversations/{thread_id}")
-def get_conversation(request: Request, thread_id: str, user: CurrentUser) -> dict[str, Any]:
+def get_conversation(
+    request: Request,
+    thread_id: uuid.UUID,
+    user: CurrentUser,
+    conn: DbDep,
+) -> dict[str, Any]:
     """Retrieve conversation history for a given thread_id from Postgres."""
+    conversation = repository.get_conversation(conn, thread_id, user["id"])
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
     graph = getattr(request.app.state, "agent_graph", None)
     if not graph:
         graph = create_agent_graph()
 
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": str(thread_id)}}
     try:
         state = graph.get_state(config)
         messages = []
@@ -236,6 +249,106 @@ def get_conversation(request: Request, thread_id: str, user: CurrentUser) -> dic
             for msg in raw_messages:
                 msg_dict = _message_to_dict(msg)
                 messages.append(msg_dict)
-        return {"thread_id": thread_id, "messages": messages}
+        return {
+            "thread_id": str(thread_id),
+            "title": conversation["title"],
+            "messages": messages,
+        }
     except Exception as e:
-        return {"thread_id": thread_id, "messages": [], "error": str(e)}
+        raise HTTPException(status_code=500, detail=f"Failed to load conversation: {e}") from e
+
+
+@router.put("/conversations/{thread_id}", dependencies=[CsrfProtected])
+def rename_conversation(
+    thread_id: uuid.UUID,
+    req: ConversationName,
+    user: CurrentUser,
+    conn: DbDep,
+) -> dict[str, Any]:
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Conversation name can't be empty")
+    try:
+        conversation = repository.update_conversation_title(conn, thread_id, user["id"], name)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Conversation not found") from None
+    conn.commit()
+    return {"id": str(conversation["id"]), "title": conversation["title"]}
+
+
+@router.delete("/conversations/{thread_id}", dependencies=[CsrfProtected])
+async def remove_conversation(
+    request: Request,
+    thread_id: uuid.UUID,
+    user: CurrentUser,
+    conn: DbDep,
+) -> dict[str, bool]:
+    conversation = repository.get_conversation(conn, thread_id, user["id"])
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    graph = getattr(request.app.state, "agent_graph", None)
+    if graph and graph.checkpointer:
+        delete_async = getattr(graph.checkpointer, "adelete_thread", None)
+        if callable(delete_async):
+            deleted = delete_async(str(thread_id))
+        else:
+            deleted = graph.checkpointer.delete_thread(str(thread_id))
+        if inspect.isawaitable(deleted):
+            await deleted
+    repository.delete_conversation(conn, thread_id, user["id"])
+    conn.commit()
+    return {"success": True}
+
+
+@router.post("/conversations/{thread_id}/generate-title", dependencies=[CsrfProtected])
+def generate_conversation_title(
+    request: Request,
+    thread_id: uuid.UUID,
+    user: CurrentUser,
+    conn: DbDep,
+    settings: SettingsDep,
+) -> dict[str, str]:
+    conversation = repository.get_conversation(conn, thread_id, user["id"])
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    graph = getattr(request.app.state, "agent_graph", None)
+    if not graph:
+        graph = create_agent_graph(settings=settings)
+    if not graph.checkpointer:
+        raise HTTPException(status_code=503, detail="Conversation history is unavailable")
+
+    state = graph.get_state({"configurable": {"thread_id": str(thread_id)}})
+    messages = state.values.get("messages", []) if state and state.values else []
+    first_user_message = next(
+        (message.content for message in messages if getattr(message, "type", "") == "human"),
+        None,
+    )
+    if not first_user_message:
+        raise HTTPException(status_code=400, detail="Conversation has no user message to title")
+
+    result = get_agent_model(settings).invoke(
+        [
+            SystemMessage(
+                content="Create a concise, descriptive title for this conversation. "
+                "Return only the title, with no quotation marks or explanation. "
+                "Use at most 8 words."
+            ),
+            HumanMessage(content=str(first_user_message)[:2000]),
+        ]
+    )
+    title_content = result.content
+    if isinstance(title_content, list):
+        title_content = " ".join(
+            part["text"]
+            for part in title_content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+    title = str(title_content).strip().strip("\"'")[:255].strip()
+    if not title:
+        raise HTTPException(status_code=502, detail="The model returned an empty conversation title")
+
+    updated = repository.update_conversation_title(conn, thread_id, user["id"], title)
+    conn.commit()
+    return {"id": str(updated["id"]), "title": updated["title"]}

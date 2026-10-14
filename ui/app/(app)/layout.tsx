@@ -7,7 +7,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   return (
     <SessionProvider user={user}>
       <TopNav />
-      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6 sm:py-8">{children}</main>
+      <main className="w-full flex-1 px-4 py-3 sm:px-6 sm:py-4 overflow-hidden">{children}</main>
     </SessionProvider>
   )
 }

@@ -21,7 +21,7 @@ export function TopNav() {
 
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/75 backdrop-blur-xl">
-      <div className="mx-auto flex h-14 max-w-7xl items-center gap-2 px-4 sm:gap-6 sm:px-6">
+      <div className="flex h-14 w-full items-center gap-2 px-4 sm:gap-6 sm:px-6">
         <Link href="/search" aria-label="Amber home" className="shrink-0">
           <AmberLogo />
         </Link>
