@@ -1,9 +1,9 @@
-"""Google Drive API router: importing files from Drive Picker and syncing changes."""
+"""Google Drive API router: importing files the user picked with Google's Picker."""
 
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from amber import repository
@@ -11,9 +11,13 @@ from amber.api.documents import apply_organization
 from amber.ingest import settings as indexing_settings
 from amber.ingest.pipeline import IndexingError, index_document_content, mark_document_failed
 from amber.util import drive
+from amber.util.config import get_settings
+from amber.util.ratelimit import limit
 from amber.util.security import CsrfProtected, CurrentUser, DbDep
 
 log = logging.getLogger(__name__)
+
+_picker_limit = Depends(limit("drive.picker", max_hits=30, window_seconds=60))
 
 router = APIRouter(prefix="/api/drive", tags=["drive"])
 
@@ -24,71 +28,23 @@ class DriveImportRequest(BaseModel):
     tags: list[str] = []
 
 
-@router.get("/files")
-def list_drive_files(
-    user: CurrentUser,
-    conn: DbDep,
-    q: str | None = None,
-    folder_id: str | None = "root",
-) -> dict[str, Any]:
-    """Lists files and folders from the user's Google Drive for the picker, including vector store sync status."""
-    drive_service = drive.build_drive_service(user["id"], conn)
-    if not drive_service:
-        raise HTTPException(status_code=400, detail="Google Drive is not connected for this user")
-
-    if q:
-        query = f"trashed = false and name contains '{q}'"
-    else:
-        target_folder = folder_id or "root"
-        query = f"'{target_folder}' in parents and trashed = false"
-
+@router.post("/picker-token", dependencies=[CsrfProtected, _picker_limit])
+def picker_token(user: CurrentUser, conn: DbDep) -> dict[str, Any]:
+    """What the browser needs to open Google's file picker: a short-lived drive.file access token,
+    the picker's browser API key, and the project number it uses as the app ID."""
+    settings = get_settings()
+    if not settings.picker_api_key or not settings.google_cloud_project_number:
+        raise HTTPException(status_code=503, detail="The Google file picker isn't configured on this server")
     try:
-        response = (
-            drive_service.files()
-            .list(
-                q=query,
-                pageSize=100,
-                fields="files(id, name, mimeType, size, webViewLink, modifiedTime, parents)",
-                orderBy="folder,name",
-            )
-            .execute()
-        )
-        files = response.get("files", [])
-
-        # Fetch current folder name if not root and no search query
-        current_folder_name = "My Drive"
-        if not q and folder_id and folder_id != "root":
-            try:
-                folder_meta = drive_service.files().get(fileId=folder_id, fields="name").execute()
-                current_folder_name = folder_meta.get("name", "Folder")
-            except Exception:
-                pass
-
-        enriched_files = []
-        for f in files:
-            file_id = f["id"]
-            mime_type = f.get("mimeType", "")
-            is_folder = mime_type == "application/vnd.google-apps.folder"
-            
-            doc = None
-            if not is_folder:
-                doc = repository.get_document_by_drive_file_id(conn, user["id"], file_id)
-
-            synced = doc is not None and doc.get("status") == "indexed"
-            enriched_files.append({
-                **f,
-                "is_folder": is_folder,
-                "synced": synced,
-                "document_id": str(doc["id"]) if doc else None,
-            })
-
-        return {
-            "files": enriched_files,
-            "current_folder_id": folder_id or "root",
-            "current_folder_name": current_folder_name,
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to list Google Drive files: {exc}") from exc
+        token, expires_in = drive.mint_picker_token(user["id"], conn)
+    except drive.PickerTokenError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "access_token": token,
+        "expires_in": expires_in,
+        "developer_key": settings.picker_api_key,
+        "app_id": settings.google_cloud_project_number,
+    }
 
 
 @router.post("/import", dependencies=[CsrfProtected])

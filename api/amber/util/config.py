@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     firebase_project_id: str = ""
     firebase_web_api_key: SecretStr = SecretStr("")
 
+    # Google Picker (the "Choose files from Google Drive" dialog runs in the browser).
+    # The API key is a browser key restricted to the web origin and the Picker API, so it is not secret.
+    # The project number (not the ID) is the Picker's "app ID"; it is what lets Amber read the picked files.
+    picker_api_key: str = ""
+    google_cloud_project_number: str = ""
+
     # Gemini API Key for LLM and embeddings
     gemini_api_key: SecretStr = SecretStr("")
 

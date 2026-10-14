@@ -90,8 +90,8 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
         </div>
 
         <p className="mt-6 text-center text-xs text-muted-foreground">
-          Amber requests the <code className="rounded bg-muted px-1 py-0.5">drive.readonly</code> scope. You can
-          disconnect Drive anytime from your profile.
+          Amber requests the <code className="rounded bg-muted px-1 py-0.5">drive.file</code> scope, so it can only open
+          files you pick or that it saved for you. You can disconnect Drive anytime from your profile.
         </p>
       </div>
     </main>

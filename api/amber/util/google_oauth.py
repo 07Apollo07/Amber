@@ -51,7 +51,6 @@ def authorization_url(settings: Settings, *, state: str, nonce: str, code_challe
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
         "access_type": "offline",  # needed for a refresh token (Drive access while the user is away)
-        "include_granted_scopes": "true",
         # Google only issues a refresh token on consent, so force it when we need one.
         "prompt": "consent" if force_consent else "select_account",
     }

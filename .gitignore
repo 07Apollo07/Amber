@@ -223,3 +223,5 @@ __marimo__/
 
 # Google service-account key files (<project>-<12 hex>.json) hold private keys; never commit them.
 *-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+
+deploy.env

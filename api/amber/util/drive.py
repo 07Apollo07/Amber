@@ -1,6 +1,7 @@
 """Google Drive integration utilities: credential creation, folder management, file upload, and permission syncing."""
 
 import io
+from datetime import datetime
 from typing import Any
 
 from google.oauth2.credentials import Credentials
@@ -8,6 +9,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
 from amber import repository
+from amber.models import DRIVE_SCOPE
 from amber.util.config import get_settings
 from amber.util.crypto import decrypt_token
 
@@ -55,6 +57,39 @@ def get_drive_credentials(user_id: Any, conn: Any) -> Credentials | None:
         client_secret=client_secret,
         scopes=token_row["scopes"].split() if token_row["scopes"] else [],
     )
+
+
+class PickerTokenError(Exception):
+    """The user's Drive connection can't produce a picker token. The message is safe to show."""
+
+
+def mint_picker_token(user_id: Any, conn: Any) -> tuple[str, int]:
+    """Returns (access_token, seconds_valid) limited to drive.file, for Google's browser-side Picker.
+
+    Only an access token ever leaves the server, never the refresh token. The scope is narrowed
+    explicitly, so a user who granted the old full-drive scope still gets a drive.file token."""
+    from google.auth.exceptions import RefreshError
+    from google.auth.transport.requests import Request
+
+    creds = get_drive_credentials(user_id, conn)
+    if creds is None:
+        raise PickerTokenError("Google Drive isn't connected. Reconnect it to pick files.")
+    narrowed = Credentials(
+        token=None,
+        refresh_token=creds.refresh_token,
+        token_uri=creds.token_uri,
+        client_id=creds.client_id,
+        client_secret=creds.client_secret,
+        scopes=[DRIVE_SCOPE],
+    )
+    try:
+        narrowed.refresh(Request())
+    except RefreshError as exc:
+        raise PickerTokenError("Google no longer accepts your Drive connection. Reconnect it to pick files.") from exc
+    except Exception as exc:
+        raise PickerTokenError("Couldn't reach Google to start the file picker. Try again.") from exc
+    seconds = int((narrowed.expiry - datetime.utcnow()).total_seconds()) if narrowed.expiry else 3000
+    return narrowed.token, max(seconds, 60)
 
 
 def build_drive_service(user_id: Any, conn: Any) -> Any | None:

@@ -3,7 +3,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from amber.api.auth import safe_return_to
-from amber.models import DRIVE_SCOPE, drive_connected
+from amber.models import DRIVE_SCOPE, can_manage_drive_sharing, drive_connected
 from tests.conftest import BASE_URL, start
 
 
@@ -48,13 +48,21 @@ def test_return_to_rejects_open_redirects(target):
     ("has_token", "scopes", "expected"),
     [
         (True, f"openid {DRIVE_SCOPE}", True),
-        (True, "openid https://www.googleapis.com/auth/drive.file", False),
+        (True, "openid https://www.googleapis.com/auth/drive.file", True),
+        (True, "openid https://www.googleapis.com/auth/drive", True),  # granted before the switch to drive.file
+        (True, "openid https://www.googleapis.com/auth/drive.readonly", False),
         (True, "openid", False),
         (False, f"openid {DRIVE_SCOPE}", False),
     ],
 )
 def test_drive_connected_needs_token_and_scope(has_token, scopes, expected):
     assert drive_connected(has_token, scopes) is expected
+
+
+def test_requested_scope_is_not_restricted():
+    assert DRIVE_SCOPE.endswith("/drive.file")
+    assert can_manage_drive_sharing(DRIVE_SCOPE)
+    assert not can_manage_drive_sharing("openid email")
 
 
 def test_api_security_headers(client):
