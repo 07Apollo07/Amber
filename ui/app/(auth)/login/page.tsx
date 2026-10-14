@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import Link from "next/link"
 import { redirect } from "next/navigation"
 import { CircleAlert, FileSearch, FolderUp, Lock, ShieldCheck } from "lucide-react"
 
@@ -92,6 +93,12 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
         <p className="mt-6 text-center text-xs text-muted-foreground">
           Amber requests the <code className="rounded bg-muted px-1 py-0.5">drive.file</code> scope, so it can only open
           files you pick or that it saved for you. You can disconnect Drive anytime from your profile.
+        </p>
+        <p className="mt-3 text-center text-xs text-muted-foreground">
+          By signing in you agree to the{" "}
+          <Link href="/terms" className="underline underline-offset-2 hover:text-foreground">Terms and Conditions</Link>{" "}
+          and the{" "}
+          <Link href="/privacy" className="underline underline-offset-2 hover:text-foreground">Privacy Policy</Link>.
         </p>
       </div>
     </main>
