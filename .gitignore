@@ -3,6 +3,14 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+deploy.env
+deploy/.gcloudignore
+deploy/cloudrun.env
+api/.gcloudignore
+api/.dockerignore
+ui/.gcloudignore
+ui/.dockerignore
+
 claude-sesh/
 
 # C extensions
@@ -224,4 +232,5 @@ __marimo__/
 # Google service-account key files (<project>-<12 hex>.json) hold private keys; never commit them.
 *-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
 
-deploy.env
+
+deploy/cloudrun.env

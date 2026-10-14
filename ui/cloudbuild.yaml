@@ -1,0 +1,5 @@
+# Builds the web image. The API address is baked into Next's /api rewrite at build time.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-t", "${_IMAGE}", "--build-arg", "AMBER_API_ORIGIN=${_API_ORIGIN}", "."]
+images: ["${_IMAGE}"]

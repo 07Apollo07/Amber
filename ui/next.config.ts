@@ -13,6 +13,8 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   output: "standalone", // a self-contained server for the Docker image
+  // The /api rewrite buffers request bodies; Next's 10 MB default would reject uploads below the app's own limit.
+  experimental: { proxyClientMaxBodySize: "32mb" },
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }]
   },

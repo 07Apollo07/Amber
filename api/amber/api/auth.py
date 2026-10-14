@@ -251,7 +251,9 @@ def google_callback(
     try:
         session_cookie = firebase.create_session_cookie(settings, fb["id_token"])
     except Exception as exc:
-        log.error("Creating the Firebase session cookie failed: %s: %s", type(exc).__name__, exc)
+        # Firebase's own message is generic; Google's reply (which names the missing permission) is on the cause.
+        reply = getattr(getattr(getattr(exc, "cause", None), "http_response", None), "text", "")
+        log.error("Creating the Firebase session cookie failed: %s: %s Google said: %s", type(exc).__name__, exc, reply[:500])
         conn.rollback()
         return _fail(settings, "firebase_session")
 
