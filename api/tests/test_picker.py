@@ -36,6 +36,25 @@ def test_token_is_narrowed_to_drive_file(monkeypatch):
     assert seen["scopes"] == [DRIVE_SCOPE]  # even if the stored grant was broader
 
 
+def test_drive_credentials_do_not_request_stored_scopes_on_refresh(monkeypatch, settings):
+    monkeypatch.setattr(drive, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        drive.repository,
+        "get_token",
+        lambda *_: {
+            "encrypted_refresh_token": b"encrypted",
+            "scopes": f"openid email profile {DRIVE_SCOPE}",
+        },
+    )
+    monkeypatch.setattr(drive, "decrypt_token", lambda *_args, **_kwargs: "refresh-token")
+
+    credentials = drive.get_drive_credentials("user-id", object())
+
+    assert credentials is not None
+    assert credentials.refresh_token == "refresh-token"
+    assert credentials.scopes is None
+
+
 def test_not_connected_is_a_clear_error(monkeypatch):
     monkeypatch.setattr(drive, "get_drive_credentials", lambda *_: None)
     with pytest.raises(drive.PickerTokenError):

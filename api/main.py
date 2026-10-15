@@ -37,7 +37,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 checkpointer = AsyncPostgresSaver(pool)
                 await checkpointer.setup()
                 app.state.checkpointer = checkpointer
-                app.state.agent_graph = create_agent_graph(checkpointer=checkpointer, settings=settings)
+                app.state.agent_graph = create_agent_graph(
+                    checkpointer=checkpointer,
+                    settings=settings,
+                    workspace_writes_enabled=True,
+                )
             except Exception as e:
                 print(f"Warning: Failed to initialize AsyncPostgresSaver checkpointer (falling back to MemorySaver): {e}")
                 from langgraph.checkpoint.memory import MemorySaver
@@ -49,6 +53,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             checkpointer = MemorySaver()
             app.state.checkpointer = checkpointer
             app.state.agent_graph = create_agent_graph(checkpointer=checkpointer, settings=settings)
+
+        app.state.agent_legacy_graph = create_agent_graph(
+            checkpointer=checkpointer,
+            settings=settings,
+        )
 
         yield
 

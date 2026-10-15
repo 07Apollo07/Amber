@@ -21,6 +21,17 @@ import {
   PromptInputTextarea,
 } from "@/components/ai-elements/prompt-input"
 import { Shimmer } from "@/components/ai-elements/shimmer"
+import {
+  Queue,
+  QueueItem,
+  QueueItemContent,
+  QueueItemIndicator,
+  QueueList,
+  QueueSection,
+  QueueSectionContent,
+  QueueSectionLabel,
+  QueueSectionTrigger,
+} from "@/components/ai-elements/queue"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -62,6 +73,46 @@ type ToolEntry = {
 }
 
 type TimelineEntry = TextEntry | ToolEntry
+type TaskStatus = "pending" | "in_progress" | "completed" | "failed"
+type AgentTask = { id: string; title: string; status: TaskStatus }
+function readAgentTasks(value: unknown): AgentTask[] {
+  if (!Array.isArray(value)) return []
+  return value.filter(
+    (task): task is AgentTask =>
+      isRecord(task) &&
+      typeof task.id === "string" &&
+      typeof task.title === "string" &&
+      (task.status === "pending" ||
+        task.status === "in_progress" ||
+        task.status === "completed" ||
+        task.status === "failed"),
+  )
+}
+
+const taskIdsByTool: Record<string, string> = {
+  vector_search: "find-files",
+  get_file: "read-source",
+  create_google_doc: "edit-document",
+  edit_google_doc: "edit-document",
+  create_google_sheet: "edit-document",
+  edit_google_sheet: "edit-document",
+}
+type WorkspaceFile = {
+  documentId: string
+  title: string
+  content: string
+  driveUrl: string
+  mimeType: string
+  values?: (string | number | boolean | null)[][]
+}
+type WorkspaceApproval = {
+  operation_id: string
+  kind: string
+  title: string
+  url?: string
+  before?: string | null
+  after: string
+}
 
 type AgentToolCall = {
   id?: string
@@ -101,6 +152,45 @@ function formatToolArgs(args: unknown): string {
   if (typeof args === "string") return args
   if (args === undefined || args === null) return "{}"
   return JSON.stringify(args, null, 2)
+}
+
+function parseWorkspaceFileResult(result: string): {
+  file: WorkspaceFile
+  summary: string
+} | null {
+  try {
+    const payload = JSON.parse(result) as {
+      document_id?: string
+      title?: string
+      content?: string
+      drive_url?: string
+      mime_type?: string
+      values?: unknown[][]
+    }
+    if (
+      !payload.document_id ||
+      (typeof payload.content !== "string" && !Array.isArray(payload.values))
+    ) {
+      return null
+    }
+    return {
+      file: {
+        documentId: payload.document_id,
+        title: payload.title || "Workspace file",
+        content: typeof payload.content === "string"
+          ? payload.content
+          : (payload.values || []).map((row) => row.map(String).join("\t")).join("\n"),
+        driveUrl: payload.drive_url || "",
+        mimeType: payload.mime_type || "",
+        values: Array.isArray(payload.values)
+          ? payload.values as (string | number | boolean | null)[][]
+          : undefined,
+      },
+      summary: `Workspace file: ${payload.title || "file"}`,
+    }
+  } catch {
+    return null
+  }
 }
 
 function getMessagesFromUpdate(data: unknown): AgentMessage[] {
@@ -170,9 +260,9 @@ function makeHistory(messages: AgentMessage[]): TimelineEntry[] {
         (entry): entry is ToolEntry => entry.kind === "tool" && entry.callId === callId,
       )
       const result = text || formatToolArgs(message.content)
-
+      const workspaceFile = parseWorkspaceFileResult(result)
       if (existing) {
-        existing.result = result
+        existing.result = workspaceFile?.summary || result
         existing.status = message.status === "error" ? "failed" : "success"
       } else {
         entries.push({
@@ -181,7 +271,7 @@ function makeHistory(messages: AgentMessage[]): TimelineEntry[] {
           callId,
           name: message.name || "Tool",
           args: "{}",
-          result,
+          result: workspaceFile?.summary || result,
           status: message.status === "error" ? "failed" : "success",
         })
       }
@@ -195,12 +285,16 @@ export function ChatLayout() {
   const [conversations, setConversations] = useState<ConversationRecord[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [entries, setEntries] = useState<TimelineEntry[]>([])
+  const [tasks, setTasks] = useState<AgentTask[]>([])
+  const [workspaceFile, setWorkspaceFile] = useState<WorkspaceFile | null>(null)
+  const [approval, setApproval] = useState<WorkspaceApproval | null>(null)
   const [draft, setDraft] = useState("")
   const [loading, setLoading] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState("")
   const [savingConversationId, setSavingConversationId] = useState<string | null>(null)
   const skipNextLoadRef = useRef<string | null>(null)
+  const taskPlanActiveRef = useRef(false)
 
   async function fetchConversations(): Promise<ConversationRecord[]> {
     const response = await fetch("/api/agent/conversations")
@@ -232,9 +326,27 @@ export function ChatLayout() {
         if (!response.ok) {
           throw new Error(`Failed to load conversation (${response.status})`)
         }
-        const data: { messages?: AgentMessage[]; error?: string } = await response.json()
+        const data: {
+          messages?: AgentMessage[]
+          tasks?: unknown
+          error?: string
+          pending_approval?: WorkspaceApproval | null
+        } = await response.json()
         if (data.error) throw new Error(data.error)
+        const restoredTasks = readAgentTasks(data.tasks)
         setEntries(makeHistory(data.messages || []))
+        setTasks(restoredTasks)
+        taskPlanActiveRef.current = restoredTasks.length > 0
+        setApproval(data.pending_approval || null)
+        const lastWorkspaceResult = [...(data.messages || [])].reverse().find((message) =>
+          isToolMessage(message) &&
+          ["get_file", "create_google_doc", "edit_google_doc", "create_google_sheet", "edit_google_sheet"]
+            .includes(message.name || ""),
+        )
+        const fileData = lastWorkspaceResult
+          ? parseWorkspaceFileResult(getMessageText(lastWorkspaceResult.content))
+          : null
+        setWorkspaceFile(fileData?.file || null)
       } catch (error) {
         if (!controller.signal.aborted) {
           console.error("Failed to load conversation", error)
@@ -278,7 +390,28 @@ export function ChatLayout() {
   function addOrUpdateToolResult(message: AgentMessage) {
     const callId = message.tool_call_id
     if (!callId) return
-    const result = getMessageText(message.content) || formatToolArgs(message.content)
+    if (message.status === "error" && !taskPlanActiveRef.current) {
+      const taskId = message.name ? taskIdsByTool[message.name] : undefined
+      if (taskId) {
+        setTasks((current) => {
+          const existing = current.find((task) => task.id === taskId)
+          const failedTask: AgentTask = {
+            id: taskId,
+            title: existing?.title || "Workspace operation",
+            status: "failed",
+          }
+          return existing
+            ? current.map((task) => (task.id === taskId ? failedTask : task))
+            : [...current, failedTask]
+        })
+      }
+    }
+    let result = getMessageText(message.content) || formatToolArgs(message.content)
+    const filePayload = parseWorkspaceFileResult(result)
+    if (filePayload) {
+      setWorkspaceFile(filePayload.file)
+      result = `${message.name === "get_file" ? "Read full source" : "Updated workspace file"}: ${filePayload.file.title}`
+    }
     setEntries((current) => {
       const existingIndex = current.findIndex(
         (entry) => entry.kind === "tool" && entry.callId === callId,
@@ -309,6 +442,192 @@ export function ChatLayout() {
     })
   }
 
+  function failActiveTasks() {
+    setTasks((current) =>
+      current.map((task) =>
+        task.status === "in_progress" || task.status === "pending"
+          ? { ...task, status: "failed" }
+          : task,
+      ),
+    )
+  }
+
+  async function runAgentStream(
+    response: Response,
+    startingThreadId: string | null,
+    shouldGenerateTitle: boolean,
+  ) {
+    if (!response.body) throw new Error("The chat stream did not include a response body.")
+    let threadId = startingThreadId
+    const textEntryIds = new Map<string, string>()
+    const fallbackTextId = crypto.randomUUID()
+
+    function appendAssistantText(message: AgentMessage, content: string) {
+      const messageId = message.id || "assistant"
+      const entryId = textEntryIds.get(messageId) || fallbackTextId
+      textEntryIds.set(messageId, entryId)
+      setEntries((current) => {
+        const existing = current.find(
+          (entry): entry is TextEntry => entry.kind === "text" && entry.id === entryId,
+        )
+        if (existing) {
+          return current.map((entry) =>
+            entry.kind === "text" && entry.id === entryId
+              ? { ...entry, text: entry.text + content }
+              : entry,
+          )
+        }
+        return [...current, { id: entryId, kind: "text", role: "assistant", text: content }]
+      })
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ""
+    let eventName = ""
+    let streamEnded = false
+    while (!streamEnded) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split("\n")
+      buffer = lines.pop() || ""
+      for (const line of lines) {
+        if (line.startsWith("event: ")) {
+          eventName = line.slice(7).trim()
+          continue
+        }
+        if (!line.startsWith("data: ")) continue
+        const rawData = line.slice(6).trim()
+        if (rawData === "[DONE]") {
+          streamEnded = true
+          break
+        }
+        let data: unknown
+        try {
+          data = JSON.parse(rawData)
+        } catch (error) {
+          throw new Error(
+            `Could not read ${eventName || "chat"} stream data: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          )
+        }
+        if (eventName === "metadata" && isRecord(data) && typeof data.thread_id === "string") {
+          threadId = data.thread_id
+          skipNextLoadRef.current = threadId === activeId ? null : threadId
+          setActiveId(threadId)
+          continue
+        }
+        if (eventName === "error") {
+          throw new Error(isRecord(data) && typeof data.error === "string" ? data.error : "The agent stream failed.")
+        }
+        if (eventName === "approval" && isRecord(data) && typeof data.operation_id === "string") {
+          setApproval({
+            operation_id: data.operation_id,
+            kind: typeof data.kind === "string" ? data.kind : "document_change",
+            title: typeof data.title === "string" ? data.title : "Proposed document change",
+            url: typeof data.url === "string" ? data.url : undefined,
+            before: typeof data.before === "string" ? data.before : null,
+            after: typeof data.after === "string" ? data.after : "",
+          })
+          continue
+        }
+        if (eventName.startsWith("custom") && isRecord(data) && data.type === "task_update") {
+          if (
+            typeof data.id === "string" &&
+            typeof data.title === "string" &&
+            (data.status === "pending" ||
+              data.status === "in_progress" ||
+              data.status === "completed" ||
+              data.status === "failed")
+          ) {
+            const task: AgentTask = { id: data.id, title: data.title, status: data.status }
+            setTasks((current) => {
+              const exists = current.some((item) => item.id === task.id)
+              if (taskPlanActiveRef.current && !exists) return current
+              return exists
+                ? current.map((item) => (item.id === task.id ? task : item))
+                : [...current, task]
+            })
+          }
+          continue
+        }
+        if (eventName.startsWith("custom") && isRecord(data) && data.type === "task_plan") {
+          const updatedTasks = readAgentTasks(data.tasks)
+          taskPlanActiveRef.current = updatedTasks.length > 0
+          setTasks(updatedTasks)
+          continue
+        }
+        if (eventName.startsWith("messages") && Array.isArray(data) && isRecord(data[0])) {
+          const message = data[0] as AgentMessage
+          if (isAssistantMessage(message)) {
+            const content = getMessageText(message.content)
+            if (content) appendAssistantText(message, content)
+            for (const [index, call] of (message.tool_calls || []).entries()) {
+              addOrUpdateTool(call, index, message.id)
+            }
+          } else if (isToolMessage(message)) {
+            addOrUpdateToolResult(message)
+          }
+          continue
+        }
+        if (eventName.startsWith("updates")) {
+          for (const message of getMessagesFromUpdate(data)) {
+            if (isAssistantMessage(message)) {
+              for (const [index, call] of (message.tool_calls || []).entries()) {
+                addOrUpdateTool(call, index, message.id)
+              }
+            } else if (isToolMessage(message)) {
+              addOrUpdateToolResult(message)
+            }
+          }
+        }
+      }
+    }
+    await reader.cancel()
+
+    if (shouldGenerateTitle && threadId) {
+      try {
+        const titleResponse = await apiPost(`/api/agent/conversations/${threadId}/generate-title`)
+        const titledConversation: { title: string } = await titleResponse.json()
+        setConversations((current) =>
+          current.map((conversation) =>
+            conversation.id === threadId ? { ...conversation, title: titledConversation.title } : conversation,
+          ),
+        )
+      } catch (error) {
+        console.error("Failed to generate conversation title", error)
+      }
+    }
+    fetchConversations()
+      .then(setConversations)
+      .catch((error: unknown) => console.error("Failed to refresh conversations", error))
+  }
+
+  async function respondToApproval(decision: "approve" | "reject") {
+    if (!activeId || !approval || loading) return
+    setLoading(true)
+    setApproval(null)
+    try {
+      const response = await apiPost("/api/agent/v2/stream", {
+        thread_id: activeId,
+        decision,
+        operation_id: approval.operation_id,
+      })
+      await runAgentStream(response, activeId, false)
+    } catch (error) {
+      failActiveTasks()
+      setApproval(approval)
+      demoAction(
+        "Failed to process document approval",
+        error instanceof Error ? error.message : String(error),
+      )
+    } finally {
+      setLoading(false)
+    }
+  }
+
   async function send(text: string) {
     const trimmedText = text.trim()
     if (!trimmedText || loading) return
@@ -325,143 +644,19 @@ export function ChatLayout() {
     ])
     setDraft("")
     setLoading(true)
-
-    let threadId = activeId
-    const textEntryIds = new Map<string, string>()
-    const fallbackTextId = crypto.randomUUID()
-
-    function appendAssistantText(message: AgentMessage, content: string) {
-      const messageId = message.id || "assistant"
-      const entryId = textEntryIds.get(messageId) || fallbackTextId
-      textEntryIds.set(messageId, entryId)
-
-      setEntries((current) => {
-        const existing = current.find(
-          (entry): entry is TextEntry => entry.kind === "text" && entry.id === entryId,
-        )
-        if (existing) {
-          return current.map((entry) =>
-            entry.kind === "text" && entry.id === entryId
-              ? { ...entry, text: entry.text + content }
-              : entry,
-          )
-        }
-        return [
-          ...current,
-          { id: entryId, kind: "text", role: "assistant", text: content },
-        ]
-      })
-    }
+    taskPlanActiveRef.current = false
+    setTasks([])
+    setWorkspaceFile(null)
+    setApproval(null)
 
     try {
       const response = await apiPost("/api/agent/v2/stream", {
         message: trimmedText,
-        thread_id: threadId,
+        thread_id: activeId,
       })
-      if (!response.body) throw new Error("The chat stream did not include a response body.")
-
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ""
-      let eventName = ""
-      let streamEnded = false
-
-      while (!streamEnded) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split("\n")
-        buffer = lines.pop() || ""
-
-        for (const line of lines) {
-          if (line.startsWith("event: ")) {
-            eventName = line.slice(7).trim()
-            continue
-          }
-          if (!line.startsWith("data: ")) continue
-
-          const rawData = line.slice(6).trim()
-          if (rawData === "[DONE]") {
-            streamEnded = true
-            break
-          }
-
-          let data: unknown
-          try {
-            data = JSON.parse(rawData)
-          } catch (error) {
-            throw new Error(
-              `Could not read ${eventName || "chat"} stream data: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            )
-          }
-
-          if (eventName === "metadata" && isRecord(data) && typeof data.thread_id === "string") {
-            threadId = data.thread_id
-            skipNextLoadRef.current = threadId === activeId ? null : threadId
-            setActiveId(threadId)
-            continue
-          }
-
-          if (eventName === "error") {
-            const detail = isRecord(data) && typeof data.error === "string"
-              ? data.error
-              : "The agent stream failed."
-            throw new Error(detail)
-          }
-
-          if (eventName.startsWith("messages") && Array.isArray(data) && isRecord(data[0])) {
-            const message = data[0] as AgentMessage
-            if (isAssistantMessage(message)) {
-              const content = getMessageText(message.content)
-              if (content) appendAssistantText(message, content)
-              for (const [index, call] of (message.tool_calls || []).entries()) {
-                addOrUpdateTool(call, index, message.id)
-              }
-            } else if (isToolMessage(message)) {
-              addOrUpdateToolResult(message)
-            }
-            continue
-          }
-
-          if (eventName.startsWith("updates")) {
-            for (const message of getMessagesFromUpdate(data)) {
-              if (isAssistantMessage(message)) {
-                for (const [index, call] of (message.tool_calls || []).entries()) {
-                  addOrUpdateTool(call, index, message.id)
-                }
-              } else if (isToolMessage(message)) {
-                addOrUpdateToolResult(message)
-              }
-            }
-          }
-        }
-      }
-
-      await reader.cancel()
-      if (shouldGenerateTitle && threadId) {
-        try {
-          const titleResponse = await apiPost(
-            `/api/agent/conversations/${threadId}/generate-title`,
-          )
-          const titledConversation: { title: string } = await titleResponse.json()
-          setConversations((current) =>
-            current.map((conversation) =>
-              conversation.id === threadId
-                ? { ...conversation, title: titledConversation.title }
-                : conversation,
-            ),
-          )
-        } catch (error) {
-          console.error("Failed to generate conversation title", error)
-        }
-      }
-
-      fetchConversations()
-        .then(setConversations)
-        .catch((error: unknown) => console.error("Failed to refresh conversations", error))
+      await runAgentStream(response, activeId, shouldGenerateTitle)
     } catch (error) {
+      failActiveTasks()
       demoAction(
         "Failed to send message",
         error instanceof Error ? error.message : String(error),
@@ -475,12 +670,20 @@ export function ChatLayout() {
     skipNextLoadRef.current = null
     setActiveId(null)
     setEntries([])
+    taskPlanActiveRef.current = false
+    setTasks([])
+    setWorkspaceFile(null)
+    setApproval(null)
   }
 
   function selectConversation(id: string) {
     if (id === activeId) return
     skipNextLoadRef.current = null
     setEntries([])
+    taskPlanActiveRef.current = false
+    setTasks([])
+    setWorkspaceFile(null)
+    setApproval(null)
     setActiveId(id)
   }
 
@@ -537,7 +740,7 @@ export function ChatLayout() {
   }
 
   return (
-    <div className="grid h-[calc(100dvh-7.5rem)] min-h-[520px] w-full grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,4fr)]">
+    <div className="grid h-[calc(100dvh-7.5rem)] min-h-[520px] w-full grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,4fr)] xl:grid-cols-[minmax(0,1fr)_minmax(0,3fr)_minmax(260px,1fr)]">
       <aside className="hidden min-w-0 flex-col overflow-hidden rounded-2xl border bg-card/70 p-3 lg:flex">
         <div className="mb-2 flex items-center justify-between border-b px-1 pb-3">
           <span className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -736,6 +939,26 @@ export function ChatLayout() {
           <ConversationScrollButton />
         </Conversation>
 
+        {approval && (
+          <div className="border-t border-primary/30 bg-primary/5 p-3 xl:hidden">
+            <div className="text-xs font-semibold">Review: {approval.title}</div>
+            <details className="mt-1">
+              <summary className="cursor-pointer text-xs">Show proposed change</summary>
+              <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap rounded bg-background p-2 text-[10px]">
+                {approval.after}
+              </pre>
+            </details>
+            <div className="mt-2 flex gap-2">
+              <Button size="sm" className="flex-1" disabled={loading} onClick={() => void respondToApproval("approve")}>
+                Approve
+              </Button>
+              <Button size="sm" variant="outline" className="flex-1" disabled={loading} onClick={() => void respondToApproval("reject")}>
+                Reject
+              </Button>
+            </div>
+          </div>
+        )}
+
         <div className="border-t bg-background/40 p-3 sm:px-6 sm:py-4">
           <PromptInput
             onSubmit={({ text }) => send(text)}
@@ -760,6 +983,134 @@ export function ChatLayout() {
           </p>
         </div>
       </section>
+      <aside className="hidden min-w-0 flex-col gap-3 overflow-hidden xl:flex">
+        <Queue className="min-h-0">
+          <QueueSection defaultOpen>
+            <QueueSectionTrigger>
+              <QueueSectionLabel label="Tasks" count={tasks.length} />
+            </QueueSectionTrigger>
+            <QueueSectionContent>
+              <QueueList className="max-h-56">
+                {tasks.map((task) => (
+                  <QueueItem key={task.id} className="flex-row items-center">
+                    <QueueItemIndicator
+                      completed={task.status === "completed"}
+                      className={
+                        task.status === "in_progress"
+                          ? "animate-pulse border-primary bg-primary/30"
+                          : task.status === "failed"
+                            ? "border-destructive bg-destructive/30"
+                            : undefined
+                      }
+                    />
+                    <QueueItemContent
+                      completed={task.status === "completed"}
+                      className={task.status === "in_progress" ? "text-foreground" : undefined}
+                    >
+                      {task.title}
+                    </QueueItemContent>
+                  </QueueItem>
+                ))}
+                {tasks.length === 0 && (
+                  <li className="px-3 py-2 text-xs text-muted-foreground">
+                    Tasks will appear as the agent works.
+                  </li>
+                )}
+              </QueueList>
+            </QueueSectionContent>
+          </QueueSection>
+        </Queue>
+        <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border bg-card/70">
+          <header className="border-b px-3 py-2 text-sm font-medium">Workspace</header>
+          {approval && (
+            <div className="border-b border-primary/30 bg-primary/5 p-3">
+              <div className="text-xs font-semibold">Approval required</div>
+              <div className="mt-1 text-xs text-muted-foreground">{approval.title}</div>
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                No Drive changes happen until you approve this proposal.
+              </p>
+              <details className="mt-2">
+                <summary className="cursor-pointer text-xs font-medium">Review proposed content</summary>
+                {approval.before && (
+                  <>
+                    <div className="mt-2 text-[10px] font-semibold uppercase text-muted-foreground">Current</div>
+                    <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap rounded bg-background p-2 text-[10px]">
+                      {approval.before}
+                    </pre>
+                  </>
+                )}
+                <div className="mt-2 text-[10px] font-semibold uppercase text-muted-foreground">Proposed</div>
+                <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-background p-2 text-[10px]">
+                  {approval.after}
+                </pre>
+              </details>
+              <div className="mt-3 flex gap-2">
+                <Button
+                  size="sm"
+                  className="flex-1"
+                  disabled={loading}
+                  onClick={() => void respondToApproval("approve")}
+                >
+                  Approve
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="flex-1"
+                  disabled={loading}
+                  onClick={() => void respondToApproval("reject")}
+                >
+                  Reject
+                </Button>
+              </div>
+            </div>
+          )}
+          {workspaceFile ? (
+            <>
+              <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
+                <span className="truncate text-xs font-medium" title={workspaceFile.title}>
+                  {workspaceFile.title}
+                </span>
+                {workspaceFile.driveUrl && (
+                  <a
+                    className="shrink-0 text-xs text-primary underline-offset-4 hover:underline"
+                    href={workspaceFile.driveUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open in Drive
+                  </a>
+                )}
+              </div>
+              {workspaceFile.mimeType === "application/vnd.google-apps.spreadsheet" && workspaceFile.values ? (
+                <div className="min-h-0 flex-1 overflow-auto p-3">
+                  <table className="w-full border-collapse text-left text-[11px]">
+                    <tbody>
+                      {workspaceFile.values.map((row, rowIndex) => (
+                        <tr key={rowIndex}>
+                          {row.map((value, columnIndex) => (
+                            <td key={columnIndex} className="max-w-40 truncate border px-2 py-1">
+                              {String(value ?? "")}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap p-3 text-xs leading-5">
+                  {workspaceFile.content}
+                </pre>
+              )}
+            </>
+          ) : (
+            <div className="flex flex-1 items-center justify-center p-5 text-center text-xs text-muted-foreground">
+              A source file or document preview will appear here when the agent opens one.
+            </div>
+          )}
+        </section>
+      </aside>
       <Dialog
         open={editingId !== null}
         onOpenChange={(open) => {

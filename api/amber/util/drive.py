@@ -49,13 +49,14 @@ def get_drive_credentials(user_id: Any, conn: Any) -> Credentials | None:
     client_id = settings.google_oauth_client_id
     client_secret = settings.google_oauth_client_secret.get_secret_value()
 
+    # The refresh token is already bound to its granted scopes. Passing the stored
+    # list here makes google-auth request it explicitly during every refresh.
     return Credentials(
         token=None,
         refresh_token=refresh_token,
         token_uri="https://oauth2.googleapis.com/token",
         client_id=client_id,
         client_secret=client_secret,
-        scopes=token_row["scopes"].split() if token_row["scopes"] else [],
     )
 
 

@@ -1,12 +1,14 @@
 """Agent chat API endpoint with LangGraph state persistence in PostgreSQL."""
 
-import json
 import inspect
+import json
 import uuid
-from typing import Any
+from typing import Any, Literal
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from amber import repository
@@ -17,8 +19,10 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = ""
     thread_id: str | None = None
+    decision: Literal["approve", "reject"] | None = None
+    operation_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class ConversationName(BaseModel):
@@ -53,7 +57,7 @@ def _serialize_data(stream_type: str, data: Any) -> str:
     return json.dumps(data, default=_default_serializer)
 
 
-@router.post("/v2/stream")
+@router.post("/v2/stream", dependencies=[CsrfProtected])
 async def stream_agent_v2(
     request: Request,
     body: ChatRequest,
@@ -65,27 +69,66 @@ async def stream_agent_v2(
     if not graph:
         graph = create_agent_graph()
 
+    if body.decision is not None and not body.thread_id:
+        raise HTTPException(status_code=400, detail="A conversation ID is required to respond to an approval")
     thread_id = body.thread_id or str(uuid.uuid4())
     try:
         conversation_id = uuid.UUID(thread_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid conversation ID") from None
-    conversation = repository.ensure_agent_conversation(conn, conversation_id, user["id"])
+    conversation = (
+        repository.get_conversation(conn, conversation_id, user["id"])
+        if body.decision is not None
+        else repository.ensure_agent_conversation(conn, conversation_id, user["id"])
+    )
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    conn.commit()
 
     config = {
         "configurable": {"thread_id": thread_id},
         "metadata": {"user_email": user["email"]}
     }
+    if body.decision is None and not body.message.strip():
+        raise HTTPException(status_code=400, detail="A message is required")
+    if body.decision is not None:
+        if body.message.strip():
+            raise HTTPException(status_code=400, detail="Approval requests cannot include a chat message")
+        if not body.operation_id:
+            raise HTTPException(status_code=400, detail="An approval operation ID is required")
+        state = await graph.aget_state(config)
+        if not state or not state.values or state.values.get("user_id") != str(user["id"]):
+            raise HTTPException(status_code=404, detail="Pending approval not found")
+        pending = [
+            interrupt.value
+            for task in state.tasks
+            for interrupt in getattr(task, "interrupts", ())
+            if isinstance(getattr(interrupt, "value", None), dict)
+        ]
+        if not any(
+            item.get("type") == "workspace_approval"
+            and item.get("operation_id") == body.operation_id
+            for item in pending
+        ):
+            raise HTTPException(status_code=409, detail="This approval is no longer pending")
+        graph_input: Any = Command(
+            resume={"approved": body.decision == "approve", "operation_id": body.operation_id}
+        )
+    else:
+        graph_input = {
+            "messages": [("user", body.message)],
+            "user_id": str(user["id"]),
+            "user_email": user["email"].lower(),
+            "user_domain": (user.get("domain") or "").lower() or None,
+            "tasks": [],
+        }
+    conn.commit()
 
     async def sse_generator():
         print(f"[SSE_V2] Starting stream for thread_id={thread_id}, message={body.message!r}")
         yield f"event: metadata\ndata: {json.dumps({'thread_id': thread_id})}\n\n"
         try:
             async for chunk in graph.astream(
-                {"messages": [("user", body.message)]},
+                graph_input,
                 config=config,
                 stream_mode=["values", "messages", "updates", "custom"],
                 version="v2",
@@ -103,6 +146,13 @@ async def stream_agent_v2(
                 serialized_data = _serialize_data(stream_type, data)
                 print(f"[SSE_V2] Yielding serialized_data={serialized_data[:200]}...")
                 yield f"event: {event_name}\ndata: {serialized_data}\n\n"
+            if getattr(graph, "checkpointer", None):
+                final_state = await graph.aget_state(config)
+                for task in getattr(final_state, "tasks", ()):
+                    for pending_interrupt in getattr(task, "interrupts", ()):
+                        value = getattr(pending_interrupt, "value", None)
+                        if isinstance(value, dict) and value.get("type") == "workspace_approval":
+                            yield f"event: approval\ndata: {json.dumps(value, default=_default_serializer)}\n\n"
             print("[SSE_V2] Stream completed successfully, yielding [DONE]")
             yield "event: end\ndata: [DONE]\n\n"
         except Exception as e:
@@ -122,10 +172,10 @@ async def stream_agent_v2(
     )
 
 
-@router.post("/chat")
+@router.post("/chat", dependencies=[CsrfProtected])
 def chat_agent(request: Request, body: ChatRequest, user: CurrentUser) -> StreamingResponse:
     """Stream chat responses from the LangGraph agent with conversation state stored in Postgres."""
-    graph = getattr(request.app.state, "agent_graph", None)
+    graph = getattr(request.app.state, "agent_legacy_graph", None)
     if not graph:
         graph = create_agent_graph()
 
@@ -140,9 +190,16 @@ def chat_agent(request: Request, body: ChatRequest, user: CurrentUser) -> Stream
         try:
             tool_calls = []
             tool_results = []
-            current_tool_call = None
             
-            for event in graph.stream({"messages": [("user", body.message)]}, config=config):
+            for event in graph.stream(
+                {
+                    "messages": [("user", body.message)],
+                    "user_id": str(user["id"]),
+                    "user_email": user["email"].lower(),
+                    "user_domain": (user.get("domain") or "").lower() or None,
+                },
+                config=config,
+            ):
                 for node_name, node_output in event.items():
                     messages = node_output.get("messages", [])
                     for msg in messages:
@@ -244,15 +301,28 @@ def get_conversation(
     try:
         state = graph.get_state(config)
         messages = []
+        tasks = []
+        pending_approval = None
         if state and state.values:
             raw_messages = state.values.get("messages", [])
             for msg in raw_messages:
                 msg_dict = _message_to_dict(msg)
                 messages.append(msg_dict)
+            raw_tasks = state.values.get("tasks", [])
+            if isinstance(raw_tasks, list):
+                tasks = raw_tasks
+            for task in getattr(state, "tasks", ()):
+                for pending_interrupt in getattr(task, "interrupts", ()):
+                    value = getattr(pending_interrupt, "value", None)
+                    if isinstance(value, dict) and value.get("type") == "workspace_approval":
+                        pending_approval = value
+                        break
         return {
             "thread_id": str(thread_id),
             "title": conversation["title"],
             "messages": messages,
+            "tasks": tasks,
+            "pending_approval": pending_approval,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load conversation: {e}") from e

@@ -20,6 +20,20 @@ Google ──GET /api/auth/google/callback?code&state──▶ API
 
 No Google or Firebase token ever reaches browser JavaScript. Every request verifies the session cookie with Firebase (including revocation), then loads the user and role from Postgres. State-changing requests need the `X-Amber-CSRF` header to match the CSRF cookie, and must come from the app's own origin.
 
+## Agent document workspace
+
+The agent searches indexed documents visible to the signed-in Amber user. When it needs more than indexed excerpts, `get_file` retrieves the indexed source using the Drive connection of the document owner, after checking the caller's Amber access to that document. The model receives at most 80,000 extracted characters.
+
+The native Workspace tools use the signed-in user's Google credentials and the existing narrow `drive.file` grant. Drive browsing is limited to files selected for Amber or created by Amber; it does not expose the user's entire Drive. Available operations include metadata/content reads, supported Docs/Sheets exports, folder and file creation/upload, rename/move/copy/trash/restore/delete, descriptions/starring, sharing permissions, and Drive comments/replies. Public-link sharing is not offered. The standard Drive API does not provide comment assignment operations.
+
+Docs tools can read bounded document structure (including tabs, styles, tables, and page elements) and propose allowlisted text, formatting, table, image, page-element, named-range, and tab updates. Sheets tools can read workbook metadata and bounded cell ranges with formulas/formatting; propose bounded value updates, appends and clears; or propose allowlisted native batch requests for formatting, layout, workbook settings, validation, filters, protections, charts, pivots, slicers, and tables. Exports create a separate Drive file rather than changing the native source.
+
+Every Workspace mutation pauses at a durable LangGraph checkpoint until the signed-in user approves or rejects it in the existing chat approval interface. No new file-browser or embedded-editor UI is included. Docs updates use the Docs API's required revision control. The Sheets API has no equivalent atomic revision check; Amber compares the reviewed workbook timestamp and affected cell values immediately before writing, but a concurrent edit could still race that final check. File and range reads/uploads are bounded by configured limits.
+
+For multi-step or long-running requests, the agent uses a checkpointed task pad: it creates a plan before tool work, updates task statuses as work progresses, and receives the current plan on each model turn. The existing chat Queue displays the plan live and restores it when a conversation is reopened. Simple requests do not require a plan.
+
+Enable the **Google Drive API**, **Google Docs API**, and **Google Sheets API** in the Google Cloud project used by Amber's OAuth client. The `drive.file` OAuth scope continues to support only selected and Amber-created files; no broader Drive scope is requested. New Docs, Sheets, folders, uploads, and exports are created in the user's Drive or the selected destination. If durable checkpointing is unavailable, the agent disables all Workspace write tools rather than offering unresumable approvals.
+
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/auth/google/start?return_to=&reconnect=` | Start sign-in. `reconnect=true` forces the consent screen to re-grant Drive. |
