@@ -2,9 +2,12 @@
 
 import inspect
 import json
+import logging
+import time
 import uuid
 from typing import Any, Literal
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -13,14 +16,20 @@ from pydantic import BaseModel, Field
 
 from amber import repository
 from amber.agent.graph import create_agent_graph, get_agent_model
+from amber.util.config import Settings
 from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
+log = logging.getLogger(__name__)
+
+_MODEL_LIST_CACHE_SECONDS = 60
+_LITELLM_REQUEST_TIMEOUT_SECONDS = 10
 
 
 class ChatRequest(BaseModel):
     message: str = ""
     thread_id: str | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=255)
     decision: Literal["approve", "reject"] | None = None
     operation_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
@@ -57,12 +66,85 @@ def _serialize_data(stream_type: str, data: Any) -> str:
     return json.dumps(data, default=_default_serializer)
 
 
+def _litellm_models_url(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith("/v1/models"):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/models"
+    return f"{base}/v1/models"
+
+
+async def _available_models(request: Request, settings: Settings) -> list[str]:
+    """Return the proxy's currently available model IDs, cached briefly per API process."""
+    if not settings.litellm_base_url:
+        return []
+
+    now = time.monotonic()
+    cached = getattr(request.app.state, "litellm_models_cache", None)
+    if cached and cached["expires_at"] > now:
+        return cached["models"]
+
+    headers = {}
+    api_key = settings.litellm_api_key.get_secret_value()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        async with httpx.AsyncClient(timeout=_LITELLM_REQUEST_TIMEOUT_SECONDS) as client:
+            response = await client.get(_litellm_models_url(settings.litellm_base_url), headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("Unable to load available models from LiteLLM: %s", exc)
+        raise HTTPException(status_code=502, detail="Unable to load available models from LiteLLM") from exc
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        log.warning("LiteLLM returned an invalid model list response")
+        raise HTTPException(status_code=502, detail="LiteLLM returned an invalid model list")
+
+    models = list(
+        dict.fromkeys(
+            item["id"]
+            for item in payload["data"]
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip()
+        )
+    )
+    request.app.state.litellm_models_cache = {
+        "models": models,
+        "expires_at": now + _MODEL_LIST_CACHE_SECONDS,
+    }
+    return models
+
+
+@router.get("/models")
+async def list_agent_models(
+    request: Request,
+    user: CurrentUser,
+    settings: SettingsDep,
+) -> dict[str, Any]:
+    """List model IDs available to Amber through the configured LiteLLM proxy."""
+    if not settings.litellm_base_url:
+        return {
+            "enabled": False,
+            "default_model": settings.agent_model_name,
+            "models": [],
+        }
+
+    return {
+        "enabled": True,
+        "default_model": settings.agent_model_name,
+        "models": await _available_models(request, settings),
+    }
+
+
 @router.post("/v2/stream", dependencies=[CsrfProtected])
 async def stream_agent_v2(
     request: Request,
     body: ChatRequest,
     user: CurrentUser,
     conn: DbDep,
+    settings: SettingsDep,
 ) -> StreamingResponse:
     """Stream chat responses following the official LangGraph v2 protocol with Postgres checkpointing."""
     graph = getattr(request.app.state, "agent_graph", None)
@@ -88,6 +170,11 @@ async def stream_agent_v2(
         "configurable": {"thread_id": thread_id},
         "metadata": {"user_email": user["email"]}
     }
+    if body.model:
+        available_models = await _available_models(request, settings)
+        if body.model not in available_models:
+            raise HTTPException(status_code=400, detail="The selected model is not available")
+        config["configurable"]["model_name"] = body.model
     if body.decision is None and not body.message.strip():
         raise HTTPException(status_code=400, detail="A message is required")
     if body.decision is not None:
@@ -120,6 +207,7 @@ async def stream_agent_v2(
             "user_email": user["email"].lower(),
             "user_domain": (user.get("domain") or "").lower() or None,
             "tasks": [],
+            "visuals": {},
         }
     conn.commit()
 
@@ -302,6 +390,7 @@ def get_conversation(
         state = graph.get_state(config)
         messages = []
         tasks = []
+        visuals = {}
         pending_approval = None
         if state and state.values:
             raw_messages = state.values.get("messages", [])
@@ -311,6 +400,9 @@ def get_conversation(
             raw_tasks = state.values.get("tasks", [])
             if isinstance(raw_tasks, list):
                 tasks = raw_tasks
+            raw_visuals = state.values.get("visuals", {})
+            if isinstance(raw_visuals, dict):
+                visuals = raw_visuals
             for task in getattr(state, "tasks", ()):
                 for pending_interrupt in getattr(task, "interrupts", ()):
                     value = getattr(pending_interrupt, "value", None)
@@ -322,6 +414,7 @@ def get_conversation(
             "title": conversation["title"],
             "messages": messages,
             "tasks": tasks,
+            "visuals": visuals,
             "pending_approval": pending_approval,
         }
     except Exception as e:

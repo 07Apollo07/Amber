@@ -6,9 +6,11 @@ import hashlib
 import io
 import json
 import logging
+import math
 import re
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 import httpx
 from googleapiclient.discovery import build
@@ -107,6 +109,313 @@ def update_task_list(
                 )
             ],
         }
+    )
+
+
+def _validate_visual_rows(rows: list[dict], *, max_rows: int = 100) -> list[dict]:
+    if not isinstance(rows, list) or not rows or len(rows) > max_rows:
+        raise ValueError(f"Visual data must contain between 1 and {max_rows} rows.")
+    normalized_rows = []
+    for row in rows:
+        if not isinstance(row, dict) or not row or len(row) > 20:
+            raise ValueError("Each visual data row must be a non-empty object with at most 20 fields.")
+        normalized = {}
+        for key, value in row.items():
+            if not isinstance(key, str) or not key.strip() or len(key) > 80:
+                raise ValueError("Visual data field names must contain 1-80 characters.")
+            if isinstance(value, (dict, list)) or not isinstance(value, (str, int, float, bool, type(None))):
+                raise ValueError("Visual data values must be strings, numbers, booleans, or null.")
+            if isinstance(value, str) and len(value) > 2000:
+                raise ValueError("Visual data text values must be no longer than 2,000 characters.")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError("Visual data numbers must be finite.")
+            normalized[key.strip()] = value
+        normalized_rows.append(normalized)
+    return normalized_rows
+
+
+def _publish_visual(
+    *,
+    tool_call_id: str,
+    kind: str,
+    title: str,
+    description: str,
+    content: dict,
+) -> Command:
+    if not title.strip() or len(title) > 160:
+        raise ValueError("Visual titles must contain 1-160 characters.")
+    if len(description) > 500:
+        raise ValueError("Visual descriptions must be no longer than 500 characters.")
+    visual = {
+        "id": tool_call_id,
+        "kind": kind,
+        "title": title.strip(),
+        "description": description.strip(),
+        **content,
+    }
+    from langgraph.config import get_stream_writer
+
+    get_stream_writer()({"type": "generative_ui", "visual": visual})
+    return Command(
+        update={
+            "visuals": {tool_call_id: visual},
+            "messages": [
+                ToolMessage(
+                    content=f"Rendered {kind} visual: {title.strip()}",
+                    tool_call_id=tool_call_id,
+                )
+            ],
+        }
+    )
+
+
+@tool
+def render_chart(
+    title: str,
+    chart_type: Literal["bar", "line", "area", "donut"],
+    category_key: str,
+    series: list[str],
+    rows: list[dict],
+    description: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """Render an interactive chart, especially when the user explicitly asks for a chart.
+
+    Supply rows as objects keyed by category_key and series names, for example:
+    [{"month":"Jan","revenue":120,"cost":80},{"month":"Feb","revenue":150,"cost":95}].
+    For explicit chart requests, call this tool instead of returning a text/ASCII chart.
+    Use only values returned by a data/source tool or provided by the user; do not invent data.
+    If no reliable data is available, ask the user for the data before rendering.
+    """
+    normalized_rows = _validate_visual_rows(rows)
+    if not category_key or len(category_key) > 80:
+        raise ValueError("Provide a valid category_key for the chart.")
+    if not isinstance(series, list) or not 1 <= len(series) <= 6:
+        raise ValueError("Charts must include 1-6 numeric series.")
+    if chart_type == "donut" and len(series) != 1:
+        raise ValueError("Donut charts require exactly one numeric series.")
+    if any(not isinstance(key, str) or not key.strip() for key in series):
+        raise ValueError("Chart series names must be non-empty strings.")
+    if len(set(series)) != len(series) or category_key in series:
+        raise ValueError("Chart series must be unique and distinct from the category key.")
+    for row in normalized_rows:
+        if category_key not in row:
+            raise ValueError(f"Chart row is missing the category field {category_key!r}.")
+        for key in series:
+            value = row.get(key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+                raise ValueError(f"Chart field {key!r} must contain finite numbers in every row.")
+    return _publish_visual(
+        tool_call_id=tool_call_id,
+        kind="chart",
+        title=title,
+        description=description,
+        content={
+            "chart_type": chart_type,
+            "category_key": category_key,
+            "series": series,
+            "rows": normalized_rows,
+        },
+    )
+
+
+@tool
+def render_table(
+    title: str,
+    columns: list[str],
+    rows: list[dict],
+    description: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """Render a compact table for structured source data, search results, or comparisons."""
+    normalized_rows = _validate_visual_rows(rows)
+    if not isinstance(columns, list) or not 1 <= len(columns) <= 12:
+        raise ValueError("Tables must have 1-12 columns.")
+    if any(not isinstance(column, str) or not column.strip() for column in columns):
+        raise ValueError("Table column names must be non-empty strings.")
+    if len(set(columns)) != len(columns):
+        raise ValueError("Table column names must be non-empty and unique.")
+    if any(column not in row for row in normalized_rows for column in columns):
+        raise ValueError("Every table row must contain all declared columns.")
+    return _publish_visual(
+        tool_call_id=tool_call_id,
+        kind="table",
+        title=title,
+        description=description,
+        content={"columns": [column.strip()[:80] for column in columns], "rows": normalized_rows},
+    )
+
+
+@tool
+def render_metric_cards(
+    title: str,
+    metrics: list[dict],
+    description: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """Render KPI cards for a few important values and optional changes or context."""
+    if not isinstance(metrics, list) or not 1 <= len(metrics) <= 8:
+        raise ValueError("Provide between 1 and 8 metrics.")
+    normalized = []
+    for metric in metrics:
+        if not isinstance(metric, dict):
+            raise ValueError("Each metric must be an object.")
+        label, value = metric.get("label"), metric.get("value")
+        if not isinstance(label, str) or not label.strip() or len(label) > 80:
+            raise ValueError("Each metric needs a label of 1-80 characters.")
+        if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+            raise ValueError("Metric values must be strings or numbers.")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("Metric numbers must be finite.")
+        item = {"label": label.strip(), "value": value}
+        for key in ("change", "detail"):
+            field_value = metric.get(key)
+            if field_value is not None:
+                if not isinstance(field_value, str) or len(field_value) > 160:
+                    raise ValueError(f"Metric {key} must be a string of at most 160 characters.")
+                item[key] = field_value
+        trend = metric.get("trend")
+        if trend is not None:
+            if trend not in ("up", "down", "neutral"):
+                raise ValueError("Metric trend must be up, down, or neutral.")
+            item["trend"] = trend
+        normalized.append(item)
+    return _publish_visual(
+        tool_call_id=tool_call_id,
+        kind="metrics",
+        title=title,
+        description=description,
+        content={"metrics": normalized},
+    )
+
+
+@tool
+def render_comparison(
+    title: str,
+    columns: list[str],
+    rows: list[dict],
+    description: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """Render a side-by-side comparison of source-backed documents, options, or data."""
+    normalized_rows = _validate_visual_rows(rows, max_rows=30)
+    if not isinstance(columns, list) or not 2 <= len(columns) <= 5:
+        raise ValueError("Comparisons must have 2-5 columns.")
+    if any(not isinstance(column, str) or not column.strip() for column in columns):
+        raise ValueError("Comparison column names must be non-empty strings.")
+    if len(set(columns)) != len(columns):
+        raise ValueError("Comparison column names must be non-empty and unique.")
+    if any(column not in row for row in normalized_rows for column in columns):
+        raise ValueError("Every comparison row must contain all declared columns.")
+    return _publish_visual(
+        tool_call_id=tool_call_id,
+        kind="comparison",
+        title=title,
+        description=description,
+        content={"columns": [column.strip()[:80] for column in columns], "rows": normalized_rows},
+    )
+
+
+@tool
+def render_timeline(
+    title: str,
+    events: list[dict],
+    description: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """Render a timeline of events extracted from sources.
+
+    Each event should provide a date or date label and an event name/title.
+    Dates may be ISO dates, years, month names, or other concise source labels;
+    they are displayed as supplied and are not parsed or required to match a format.
+    Accepted date keys: date, date_label, timestamp, or time.
+    Accepted event-name keys: event, title, or label. Details are optional.
+    Example: {"date":"Q1 2024","title":"Company launched","details":"Source-backed context"}.
+    """
+    if not isinstance(events, list) or not 1 <= len(events) <= 50:
+        raise ValueError("Timelines must contain 1-50 events.")
+    normalized = []
+    for event in events:
+        if not isinstance(event, dict):
+            raise ValueError("Each timeline event must be an object.")
+        date = next(
+            (event[key] for key in ("date", "date_label", "timestamp", "time") if event.get(key) is not None),
+            None,
+        )
+        label = next(
+            (event[key] for key in ("event", "title", "label") if event.get(key) is not None),
+            None,
+        )
+        details = next(
+            (event[key] for key in ("details", "description", "summary") if event.get(key) is not None),
+            "",
+        )
+        if isinstance(date, bool) or not isinstance(date, (str, int, float)) or not str(date).strip():
+            raise ValueError("Each timeline event needs a date or date label.")
+        if len(str(date)) > 200:
+            raise ValueError("Timeline date labels must be no longer than 200 characters.")
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("Each timeline event needs a non-empty event title.")
+        if len(label) > 500:
+            raise ValueError("Timeline event titles must be no longer than 500 characters.")
+        if not isinstance(details, str):
+            raise ValueError("Timeline event details must be text.")
+        if len(details) > 2000:
+            raise ValueError("Timeline event details must be no longer than 2,000 characters.")
+        normalized.append(
+            {
+                "date": str(date).strip(),
+                "event": label.strip(),
+                "details": details.strip(),
+            }
+        )
+    return _publish_visual(
+        tool_call_id=tool_call_id,
+        kind="timeline",
+        title=title,
+        description=description,
+        content={"events": normalized},
+    )
+
+
+@tool
+def render_source_cards(
+    title: str,
+    sources: list[dict],
+    description: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+) -> Command:
+    """Render source cards with relevant excerpts for documents found by Amber."""
+    if not isinstance(sources, list) or not 1 <= len(sources) <= 10:
+        raise ValueError("Provide between 1 and 10 source cards.")
+    normalized = []
+    for source in sources:
+        if not isinstance(source, dict):
+            raise ValueError("Each source must be an object.")
+        name, excerpt = source.get("title"), source.get("excerpt")
+        if not isinstance(name, str) or not name.strip() or len(name) > 200:
+            raise ValueError("Each source needs a title of 1-200 characters.")
+        if not isinstance(excerpt, str) or not excerpt.strip() or len(excerpt) > 1000:
+            raise ValueError("Each source needs an excerpt of 1-1,000 characters.")
+        item = {"title": name.strip(), "excerpt": excerpt.strip()}
+        url = source.get("url")
+        if url is not None:
+            if not isinstance(url, str) or len(url) > 2048:
+                raise ValueError("Source URLs must be valid HTTPS Google Workspace URLs.")
+            parsed_url = urlparse(url)
+            if parsed_url.scheme != "https" or parsed_url.hostname not in {
+                "drive.google.com",
+                "docs.google.com",
+            }:
+                raise ValueError("Source URLs must be valid HTTPS Google Workspace URLs.")
+            item["url"] = url
+        normalized.append(item)
+    return _publish_visual(
+        tool_call_id=tool_call_id,
+        kind="sources",
+        title=title,
+        description=description,
+        content={"sources": normalized},
     )
 
 

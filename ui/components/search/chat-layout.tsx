@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { MessageSquare, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react"
+import { Check, ChevronDown, Cpu, MessageSquare, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react"
 
 import { AmberMark } from "@/components/app/amber-logo"
 import {
@@ -17,9 +17,24 @@ import {
 } from "@/components/ai-elements/message"
 import {
   PromptInput,
+  PromptInputBody,
+  PromptInputFooter,
+  PromptInputButton,
   PromptInputSubmit,
   PromptInputTextarea,
+  PromptInputTools,
 } from "@/components/ai-elements/prompt-input"
+import {
+  ModelSelector,
+  ModelSelectorContent,
+  ModelSelectorEmpty,
+  ModelSelectorGroup,
+  ModelSelectorInput,
+  ModelSelectorItem,
+  ModelSelectorList,
+  ModelSelectorName,
+  ModelSelectorTrigger,
+} from "@/components/ai-elements/model-selector"
 import { Shimmer } from "@/components/ai-elements/shimmer"
 import {
   Queue,
@@ -53,6 +68,11 @@ import { demoAction } from "@/lib/demo"
 import type { Conversation as ConversationRecord } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
+import {
+  GenerativeVisualCard,
+  isGenerativeVisual,
+  type GenerativeVisual,
+} from "./generative-visual"
 import { ToolElement } from "./tool-element"
 
 type TextEntry = {
@@ -72,7 +92,37 @@ type ToolEntry = {
   status: "running" | "success" | "failed"
 }
 
-type TimelineEntry = TextEntry | ToolEntry
+type VisualEntry = {
+  id: string
+  kind: "visual"
+  visual: GenerativeVisual
+}
+
+type TimelineEntry = TextEntry | ToolEntry | VisualEntry
+type AgentModelsResponse = {
+  enabled: boolean
+  default_model: string
+  models: string[]
+}
+
+function isAgentModelsResponse(value: unknown): value is AgentModelsResponse {
+  return (
+    isRecord(value) &&
+    typeof value.enabled === "boolean" &&
+    typeof value.default_model === "string" &&
+    Array.isArray(value.models) &&
+    value.models.every((model) => typeof model === "string")
+  )
+}
+
+const generativeUiTools = new Set([
+  "render_chart",
+  "render_table",
+  "render_metric_cards",
+  "render_comparison",
+  "render_timeline",
+  "render_source_cards",
+])
 type TaskStatus = "pending" | "in_progress" | "completed" | "failed"
 type AgentTask = { id: string; title: string; status: TaskStatus }
 function readAgentTasks(value: unknown): AgentTask[] {
@@ -213,8 +263,15 @@ function isToolMessage(message: AgentMessage): boolean {
   return role === "tool" || role === "ToolMessage" || Boolean(message.tool_call_id)
 }
 
-function makeHistory(messages: AgentMessage[]): TimelineEntry[] {
+function makeHistory(messages: AgentMessage[], savedVisuals: unknown): TimelineEntry[] {
   const entries: TimelineEntry[] = []
+  const visualsById = new Map<string, GenerativeVisual>()
+  if (isRecord(savedVisuals)) {
+    for (const candidate of Object.values(savedVisuals)) {
+      if (isGenerativeVisual(candidate)) visualsById.set(candidate.id, candidate)
+    }
+  }
+  const renderedVisualIds = new Set<string>()
 
   for (const [messageIndex, message] of messages.entries()) {
     const role = message.type || message.role || ""
@@ -242,6 +299,14 @@ function makeHistory(messages: AgentMessage[]): TimelineEntry[] {
 
       for (const [callIndex, call] of (message.tool_calls || []).entries()) {
         const callId = call.id || `${message.id || messageIndex}-${callIndex}`
+        if (call.name && generativeUiTools.has(call.name)) {
+          const visual = visualsById.get(callId)
+          if (visual) {
+            entries.push({ id: `visual-${visual.id}`, kind: "visual", visual })
+            renderedVisualIds.add(visual.id)
+          }
+          continue
+        }
         entries.push({
           id: `tool-${callId}`,
           kind: "tool",
@@ -256,6 +321,7 @@ function makeHistory(messages: AgentMessage[]): TimelineEntry[] {
 
     if (isToolMessage(message)) {
       const callId = message.tool_call_id || `tool-result-${messageIndex}`
+      if (message.name && generativeUiTools.has(message.name)) continue
       const existing = entries.find(
         (entry): entry is ToolEntry => entry.kind === "tool" && entry.callId === callId,
       )
@@ -278,6 +344,12 @@ function makeHistory(messages: AgentMessage[]): TimelineEntry[] {
     }
   }
 
+  for (const visual of visualsById.values()) {
+    if (!renderedVisualIds.has(visual.id)) {
+      entries.push({ id: `visual-${visual.id}`, kind: "visual", visual })
+    }
+  }
+
   return entries
 }
 
@@ -290,6 +362,10 @@ export function ChatLayout() {
   const [approval, setApproval] = useState<WorkspaceApproval | null>(null)
   const [draft, setDraft] = useState("")
   const [loading, setLoading] = useState(false)
+  const [modelOptions, setModelOptions] = useState<AgentModelsResponse | null>(null)
+  const [selectedModel, setSelectedModel] = useState<string | null>(null)
+  const [modelPickerOpen, setModelPickerOpen] = useState(false)
+  const [modelLoadError, setModelLoadError] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState("")
   const [savingConversationId, setSavingConversationId] = useState<string | null>(null)
@@ -311,6 +387,30 @@ export function ChatLayout() {
   }, [])
 
   useEffect(() => {
+    const controller = new AbortController()
+    async function fetchModels() {
+      try {
+        const response = await fetch("/api/agent/models", {
+          cache: "no-store",
+          signal: controller.signal,
+        })
+        if (!response.ok) throw new Error(`Failed to load models (${response.status})`)
+        const data: unknown = await response.json()
+        if (!isAgentModelsResponse(data)) throw new Error("The model list response is invalid")
+        setModelOptions(data)
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error("Failed to load available models", error)
+          setModelLoadError(true)
+        }
+      }
+    }
+
+    void fetchModels()
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
     if (!activeId) return
     if (skipNextLoadRef.current === activeId) {
       skipNextLoadRef.current = null
@@ -329,12 +429,13 @@ export function ChatLayout() {
         const data: {
           messages?: AgentMessage[]
           tasks?: unknown
+          visuals?: unknown
           error?: string
           pending_approval?: WorkspaceApproval | null
         } = await response.json()
         if (data.error) throw new Error(data.error)
         const restoredTasks = readAgentTasks(data.tasks)
-        setEntries(makeHistory(data.messages || []))
+        setEntries(makeHistory(data.messages || [], data.visuals))
         setTasks(restoredTasks)
         taskPlanActiveRef.current = restoredTasks.length > 0
         setApproval(data.pending_approval || null)
@@ -363,6 +464,7 @@ export function ChatLayout() {
   }, [activeId])
 
   function addOrUpdateTool(call: AgentToolCall, index: number, messageId?: string) {
+    if (call.name && generativeUiTools.has(call.name)) return
     const callId = call.id || `${messageId || "tool"}-${index}`
     const id = `tool-${callId}`
     setEntries((current) => {
@@ -390,6 +492,7 @@ export function ChatLayout() {
   function addOrUpdateToolResult(message: AgentMessage) {
     const callId = message.tool_call_id
     if (!callId) return
+    if (message.name && generativeUiTools.has(message.name)) return
     if (message.status === "error" && !taskPlanActiveRef.current) {
       const taskId = message.name ? taskIdsByTool[message.name] : undefined
       if (taskId) {
@@ -559,6 +662,23 @@ export function ChatLayout() {
           setTasks(updatedTasks)
           continue
         }
+        if (
+          eventName.startsWith("custom") &&
+          isRecord(data) &&
+          data.type === "generative_ui" &&
+          isGenerativeVisual(data.visual)
+        ) {
+          const visual = data.visual
+          setEntries((current) => {
+            const entry: VisualEntry = { id: `visual-${visual.id}`, kind: "visual", visual }
+            const existingIndex = current.findIndex(
+              (item) => item.kind === "visual" && item.visual.id === visual.id,
+            )
+            if (existingIndex < 0) return [...current, entry]
+            return current.map((item, index) => (index === existingIndex ? entry : item))
+          })
+          continue
+        }
         if (eventName.startsWith("messages") && Array.isArray(data) && isRecord(data[0])) {
           const message = data[0] as AgentMessage
           if (isAssistantMessage(message)) {
@@ -614,6 +734,7 @@ export function ChatLayout() {
         thread_id: activeId,
         decision,
         operation_id: approval.operation_id,
+        model: selectedModel ?? undefined,
       })
       await runAgentStream(response, activeId, false)
     } catch (error) {
@@ -653,6 +774,7 @@ export function ChatLayout() {
       const response = await apiPost("/api/agent/v2/stream", {
         message: trimmedText,
         thread_id: activeId,
+        model: selectedModel ?? undefined,
       })
       await runAgentStream(response, activeId, shouldGenerateTitle)
     } catch (error) {
@@ -901,7 +1023,11 @@ export function ChatLayout() {
                   key={entry.id}
                   className="max-w-full"
                 >
-                  {entry.kind === "text" && entry.role === "user" ? (
+                  {entry.kind === "visual" ? (
+                    <div className="w-full">
+                      <GenerativeVisualCard visual={entry.visual} />
+                    </div>
+                  ) : entry.kind === "text" && entry.role === "user" ? (
                     <MessageContent className="max-w-[88%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-primary/12 px-4 py-3 text-[15px] leading-6">
                       {entry.text}
                     </MessageContent>
@@ -964,20 +1090,82 @@ export function ChatLayout() {
             onSubmit={({ text }) => send(text)}
             className="mx-auto max-w-4xl"
           >
-            <PromptInputTextarea
-              value={draft}
-              onChange={(event) => setDraft(event.currentTarget.value)}
-              maxLength={2000}
-              disabled={loading}
-              placeholder="Message Amber…"
-              className="min-h-12 max-h-40 text-[15px]"
-            />
-            <PromptInputSubmit
-              status={loading ? "streaming" : "ready"}
-              disabled={!draft.trim() || loading}
-              className="mr-1 mb-1"
-            />
+            <PromptInputBody>
+              <PromptInputTextarea
+                value={draft}
+                onChange={(event) => setDraft(event.currentTarget.value)}
+                maxLength={2000}
+                disabled={loading}
+                placeholder="Message Amber…"
+                className="min-h-12 max-h-40 text-[15px]"
+              />
+            </PromptInputBody>
+            <PromptInputFooter className="border-t px-2 py-1.5">
+              <PromptInputTools>
+                {modelOptions?.enabled && (
+                  <ModelSelector open={modelPickerOpen} onOpenChange={setModelPickerOpen}>
+                    <ModelSelectorTrigger asChild>
+                      <PromptInputButton
+                        aria-label="Select model"
+                        className="max-w-[min(20rem,60vw)] justify-start"
+                      >
+                        <Cpu className="size-3.5 shrink-0" />
+                        <ModelSelectorName>
+                          {selectedModel ?? `${modelOptions.default_model} · Default`}
+                        </ModelSelectorName>
+                        <ChevronDown className="size-3.5 shrink-0 opacity-60" />
+                      </PromptInputButton>
+                    </ModelSelectorTrigger>
+                    <ModelSelectorContent title="Select a model">
+                      <ModelSelectorInput placeholder="Search available models…" />
+                      <ModelSelectorList>
+                        <ModelSelectorEmpty>No matching models.</ModelSelectorEmpty>
+                        <ModelSelectorGroup heading="Available models">
+                          <ModelSelectorItem
+                            value={`default ${modelOptions.default_model}`}
+                            onSelect={() => {
+                              setSelectedModel(null)
+                              setModelPickerOpen(false)
+                            }}
+                          >
+                            <ModelSelectorName>
+                              {modelOptions.default_model} · Default
+                            </ModelSelectorName>
+                            {!selectedModel && <Check className="size-4" />}
+                          </ModelSelectorItem>
+                          {modelOptions.models
+                            .filter((model) => model !== modelOptions.default_model)
+                            .map((model) => (
+                              <ModelSelectorItem
+                                key={model}
+                                value={model}
+                                onSelect={() => {
+                                  setSelectedModel(model)
+                                  setModelPickerOpen(false)
+                                }}
+                              >
+                                <ModelSelectorName>{model}</ModelSelectorName>
+                                {selectedModel === model && <Check className="size-4" />}
+                              </ModelSelectorItem>
+                            ))}
+                        </ModelSelectorGroup>
+                      </ModelSelectorList>
+                    </ModelSelectorContent>
+                  </ModelSelector>
+                )}
+              </PromptInputTools>
+              <PromptInputSubmit
+                status={loading ? "streaming" : "ready"}
+                disabled={!draft.trim() || loading}
+                className="shrink-0"
+              />
+            </PromptInputFooter>
           </PromptInput>
+          {modelLoadError && (
+            <p role="status" className="mx-auto mt-2 max-w-4xl text-center text-xs text-muted-foreground">
+              Available models could not be loaded; Amber will use the configured default.
+            </p>
+          )}
           <p className="mx-auto mt-2 max-w-4xl text-center text-[11px] text-muted-foreground">
             Enter to send · Shift + Enter for a new line
           </p>

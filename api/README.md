@@ -32,6 +32,10 @@ Every Workspace mutation pauses at a durable LangGraph checkpoint until the sign
 
 For multi-step or long-running requests, the agent uses a checkpointed task pad: it creates a plan before tool work, updates task statuses as work progresses, and receives the current plan on each model turn. The existing chat Queue displays the plan live and restores it when a conversation is reopened. Simple requests do not require a plan.
 
+The agent can also choose to render generative UI when it improves an answer. Its available visual tools create validated charts, tables, KPI cards, comparisons, timelines, and source cards from user-provided or tool-retrieved data. Visuals stream into the existing chat and are restored from conversation checkpoints. The renderer supports only these app-owned components; it does not execute model-generated code. Visual selection is the agent's decision rather than a prompt-keyword trigger.
+
+When `AMBER_LITELLM_BASE_URL` is configured, the chat's AI Elements model selector lists model IDs from LiteLLM's `/v1/models` endpoint. A selected model is validated against that list and used for the request; without LiteLLM, Amber continues to use `AMBER_AGENT_MODEL_NAME`.
+
 Enable the **Google Drive API**, **Google Docs API**, and **Google Sheets API** in the Google Cloud project used by Amber's OAuth client. The `drive.file` OAuth scope continues to support only selected and Amber-created files; no broader Drive scope is requested. New Docs, Sheets, folders, uploads, and exports are created in the user's Drive or the selected destination. If durable checkpointing is unavailable, the agent disables all Workspace write tools rather than offering unresumable approvals.
 
 | Endpoint | Purpose |
