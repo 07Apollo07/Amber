@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     # Origin the browser uses for both the web app and /api (same origin via the LB, or
     # the Next.js dev server's /api rewrite locally). OAuth redirects are built from it.
     public_base_url: str = "http://localhost:3000"
+    drive_sync_admin_secret: SecretStr = SecretStr("")
 
     # Google OAuth web client (must be the client configured for Firebase's Google provider).
     google_oauth_client_id: str = ""

@@ -304,6 +304,86 @@ def get_document_by_drive_file_id(conn: Connection, owner_id: uuid.UUID, drive_f
     )
 
 
+def get_drive_sync_state(conn: Connection, user_id: uuid.UUID) -> Row | None:
+    return fetch_one(
+        conn,
+        "SELECT * FROM drive_sync_state WHERE user_id = %(user_id)s FOR UPDATE",
+        {"user_id": user_id},
+    )
+
+
+def get_drive_sync_state_by_channel(conn: Connection, channel_id: str) -> Row | None:
+    return fetch_one(
+        conn,
+        "SELECT * FROM drive_sync_state WHERE channel_id = %(channel_id)s FOR UPDATE",
+        {"channel_id": channel_id},
+    )
+
+
+def save_drive_sync_state(
+    conn: Connection,
+    *,
+    user_id: uuid.UUID,
+    page_token: str,
+    channel_id: str,
+    resource_id: str,
+    token_hash: str,
+    channel_expires: datetime,
+) -> None:
+    execute(
+        conn,
+        """
+        INSERT INTO drive_sync_state
+            (user_id, page_token, channel_id, resource_id, token_hash, channel_expires, updated_at)
+        VALUES
+            (%(user_id)s, %(page_token)s, %(channel_id)s, %(resource_id)s, %(token_hash)s,
+             %(channel_expires)s, now())
+        ON CONFLICT (user_id) DO UPDATE SET
+            page_token = EXCLUDED.page_token,
+            channel_id = EXCLUDED.channel_id,
+            resource_id = EXCLUDED.resource_id,
+            token_hash = EXCLUDED.token_hash,
+            channel_expires = EXCLUDED.channel_expires,
+            updated_at = now()
+        """,
+        {
+            "user_id": user_id,
+            "page_token": page_token,
+            "channel_id": channel_id,
+            "resource_id": resource_id,
+            "token_hash": token_hash,
+            "channel_expires": channel_expires,
+        },
+    )
+
+
+def advance_drive_sync_cursor(conn: Connection, user_id: uuid.UUID, page_token: str) -> None:
+    execute(
+        conn,
+        """
+        UPDATE drive_sync_state
+        SET page_token = %(page_token)s, last_synced_at = now(), updated_at = now()
+        WHERE user_id = %(user_id)s
+        """,
+        {"user_id": user_id, "page_token": page_token},
+    )
+
+
+def list_drive_sync_users_due_for_renewal(conn: Connection) -> list[Row]:
+    return fetch_all(
+        conn,
+        """
+        SELECT user_id FROM drive_sync_state
+        WHERE channel_expires <= now() + interval '24 hours'
+        ORDER BY channel_expires
+        """,
+    )
+
+
+def delete_drive_sync_state(conn: Connection, user_id: uuid.UUID) -> None:
+    execute(conn, "DELETE FROM drive_sync_state WHERE user_id = %(user_id)s", {"user_id": user_id})
+
+
 def list_documents(
     conn: Connection,
     *,
@@ -384,23 +464,20 @@ def set_document_access(conn: Connection, document_id: uuid.UUID, grants: list[d
             continue
         if principal_type not in ("user", "domain"):
             continue
-        try:
-            execute(
-                conn,
-                """
-                INSERT INTO document_access (document_id, principal_type, principal_value, origin)
-                VALUES (%(document_id)s, %(principal_type)s, %(principal_value)s, %(origin)s)
-                ON CONFLICT (document_id, principal_type, principal_value) DO NOTHING
-                """,
-                {
-                    "document_id": document_id,
-                    "principal_type": principal_type,
-                    "principal_value": principal_value,
-                    "origin": origin,
-                },
-            )
-        except Exception:
-            pass
+        execute(
+            conn,
+            """
+            INSERT INTO document_access (document_id, principal_type, principal_value, origin)
+            VALUES (%(document_id)s, %(principal_type)s, %(principal_value)s, %(origin)s)
+            ON CONFLICT (document_id, principal_type, principal_value) DO NOTHING
+            """,
+            {
+                "document_id": document_id,
+                "principal_type": principal_type,
+                "principal_value": principal_value,
+                "origin": origin,
+            },
+        )
 
 
 def get_document_access(conn: Connection, document_id: uuid.UUID) -> list[Row]:

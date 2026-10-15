@@ -141,35 +141,32 @@ def upload_file_to_drive(
 
 
 def fetch_drive_permissions(drive_service: Any, file_id: str) -> list[dict[str, Any]]:
-    """Fetches Drive file permissions and maps them to Amber document_access grants."""
-    try:
+    """Fetches all direct user/domain grants; Google API errors propagate to prevent false revocations."""
+    grants = []
+    page_token = None
+    while True:
         response = (
             drive_service.permissions()
-            .list(fileId=file_id, fields="permissions(id, role, type, emailAddress, domain)")
+            .list(
+                fileId=file_id,
+                pageToken=page_token,
+                pageSize=100,
+                fields="nextPageToken,permissions(id, role, type, emailAddress, domain, deleted)",
+            )
             .execute()
         )
-        raw_perms = response.get("permissions", [])
-    except Exception:
-        raw_perms = []
+        for permission in response.get("permissions", []):
+            if permission.get("deleted") or permission.get("role") not in ("reader", "commenter", "writer", "owner"):
+                continue
 
-    grants = []
-    for p in raw_perms:
-        ptype = p.get("type")
-        role = p.get("role")
-        if role not in ("reader", "commenter", "writer", "owner"):
-            continue
+            if permission.get("type") == "user" and permission.get("emailAddress"):
+                grants.append({"grant_type": "user", "grantee": permission["emailAddress"].lower()})
+            elif permission.get("type") == "domain" and permission.get("domain"):
+                grants.append({"grant_type": "domain", "grantee": permission["domain"].lower()})
 
-        if ptype == "user":
-            email = p.get("emailAddress")
-            if email:
-                grants.append({"grant_type": "user", "grantee": email.lower()})
-        elif ptype == "domain":
-            domain = p.get("domain")
-            if domain:
-                grants.append({"grant_type": "domain", "grantee": domain.lower()})
-        elif ptype == "anyone":
-            grants.append({"grant_type": "public", "grantee": None})
-        # Group entries or others are conservatively ignored per spec.
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
 
     return grants
 

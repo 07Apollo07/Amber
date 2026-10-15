@@ -1,19 +1,20 @@
 """Google Drive API router: importing files the user picked with Google's Picker."""
 
+import hmac
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
 from amber import repository
 from amber.api.documents import apply_organization
 from amber.ingest import settings as indexing_settings
 from amber.ingest.pipeline import IndexingError, index_document_content, mark_document_failed
-from amber.util import drive
+from amber.util import drive, drive_sync
 from amber.util.config import get_settings
 from amber.util.ratelimit import limit
-from amber.util.security import CsrfProtected, CurrentUser, DbDep
+from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +54,11 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
     drive_service = drive.build_drive_service(user["id"], conn)
     if not drive_service:
         raise HTTPException(status_code=400, detail="Google Drive is not connected for this user")
+
+    try:
+        drive_sync.ensure_drive_watch(user["id"], conn, get_settings())
+    except drive_sync.DriveSyncError as exc:
+        log.warning("Could not start Drive change notifications for user %s: %s", user["id"], exc)
 
     max_bytes = indexing_settings.load(conn).max_upload_bytes
     imported = []
@@ -165,3 +171,53 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
     )
     conn.commit()
     return {"success": True, "imported": imported, "skipped": skipped, "failed": failed}
+
+
+@router.post("/webhook", status_code=status.HTTP_204_NO_CONTENT)
+def drive_webhook(request: Request, conn: DbDep) -> Response:
+    """Google notifications are hints; fetch and reconcile the authoritative changes feed."""
+    channel_id = request.headers.get("X-Goog-Channel-ID")
+    sync_state = repository.get_drive_sync_state_by_channel(conn, channel_id or "")
+    if not sync_state or not drive_sync.validate_notification(
+        sync_state,
+        request.headers.get("X-Goog-Channel-Token"),
+        request.headers.get("X-Goog-Resource-ID"),
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown Drive notification channel")
+
+    try:
+        drive_sync.process_drive_changes(conn, sync_state)
+    except Exception as exc:
+        conn.rollback()
+        log.exception("Drive notification processing failed for user %s", sync_state["user_id"])
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Drive sync will be retried",
+        ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/sync/renew")
+def renew_drive_watches(request: Request, settings: SettingsDep, conn: DbDep) -> dict[str, int]:
+    """Renew expiring watch channels; intended for a daily Cloud Scheduler request."""
+    secret = settings.drive_sync_admin_secret.get_secret_value()
+    supplied_secret = request.headers.get("X-Amber-Drive-Sync-Secret", "")
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Drive sync renewal is not configured",
+        )
+    if not supplied_secret or not hmac.compare_digest(secret, supplied_secret):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+    due_users = repository.list_drive_sync_users_due_for_renewal(conn)
+    renewed = 0
+    failed = 0
+    for row in due_users:
+        try:
+            renewed += int(drive_sync.ensure_drive_watch(row["user_id"], conn, settings, force=True))
+        except Exception:
+            conn.rollback()
+            failed += 1
+            log.exception("Could not renew Drive watch for user %s", row["user_id"])
+    return {"renewed": renewed, "failed": failed}

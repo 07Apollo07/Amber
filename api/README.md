@@ -37,6 +37,18 @@ The agent can also choose to render generative UI when it improves an answer. It
 When `AMBER_LITELLM_BASE_URL` is configured, the chat's AI Elements model selector lists model IDs from LiteLLM's `/v1/models` endpoint. A selected model is validated against that list and used for the request; without LiteLLM, Amber continues to use `AMBER_AGENT_MODEL_NAME`.
 
 Enable the **Google Drive API**, **Google Docs API**, and **Google Sheets API** in the Google Cloud project used by Amber's OAuth client. The `drive.file` OAuth scope continues to support only selected and Amber-created files; no broader Drive scope is requested. New Docs, Sheets, folders, uploads, and exports are created in the user's Drive or the selected destination. If durable checkpointing is unavailable, the agent disables all Workspace write tools rather than offering unresumable approvals.
+## Drive permission synchronization
+
+After Drive is connected or a file is imported, Amber registers a Google Drive Changes API watch. Google sends notifications to `POST /api/drive/webhook`; each notification is authenticated against its stored channel, then Amber reads the user's changes feed and refreshes permissions for already-indexed files. The webhook uses Drive's `drive.file` scope and synchronizes direct user and domain grants. Group, link-wide, and Shared Drive permissions are not synchronized.
+
+Apply `schema.sql` to add the `drive_sync_state` table before deploying this feature. Set `AMBER_PUBLIC_BASE_URL` to the public HTTPS origin that routes `/api/drive/webhook` to this API. Drive watch channels expire, so configure `AMBER_DRIVE_SYNC_ADMIN_SECRET` and a daily Cloud Scheduler job that sends:
+
+```http
+POST /api/drive/sync/renew
+X-Amber-Drive-Sync-Secret: <configured secret>
+```
+
+The renewal endpoint returns counts of renewed and failed channels. A failed permission fetch does not replace the current ACL or advance that user's change cursor; Google can retry the webhook.
 
 | Endpoint | Purpose |
 |---|---|
@@ -46,6 +58,8 @@ Enable the **Google Drive API**, **Google Docs API**, and **Google Sheets API** 
 | `POST /api/auth/logout-all` | Revoke every session for the account. |
 | `POST /api/auth/google/disconnect` | Revoke the Drive grant at Google and delete the stored token. |
 | `GET /api/me` | Current user, role and Drive status. |
+| `POST /api/drive/webhook` | Receive Google Drive change notifications (Google only). |
+| `POST /api/drive/sync/renew` | Renew expiring Drive watch channels (scheduler secret required). |
 
 ## Local development
 

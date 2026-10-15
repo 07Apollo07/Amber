@@ -100,6 +100,18 @@ CREATE TABLE IF NOT EXISTS document_access (
 CREATE INDEX IF NOT EXISTS ix_document_access_lookup ON document_access (principal_type, principal_value);
 CREATE INDEX IF NOT EXISTS ix_document_access_document_id ON document_access (document_id);
 
+CREATE TABLE IF NOT EXISTS drive_sync_state (
+    user_id          uuid PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+    page_token       text NOT NULL,
+    channel_id       varchar(255) NOT NULL UNIQUE,
+    resource_id      varchar(255) NOT NULL,
+    token_hash       varchar(64) NOT NULL,
+    channel_expires  timestamptz NOT NULL,
+    last_synced_at   timestamptz,
+    updated_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_drive_sync_state_expiration ON drive_sync_state (channel_expires);
+
 CREATE TABLE IF NOT EXISTS chunks (
     id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id  uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
@@ -241,6 +253,7 @@ BEGIN
 
     GRANT SELECT, INSERT, UPDATE, DELETE ON documents TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON document_access TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON drive_sync_state TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON chunks TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON collections TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON collection_documents TO amber_app;
