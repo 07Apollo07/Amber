@@ -140,6 +140,38 @@ def upload_file_to_drive(
     return file
 
 
+class UnsupportedDriveFile(Exception):
+    """A Google-native file type (Forms, Drawings, Sites...) with nothing to index."""
+
+
+def download_file(drive_service: Any, file_id: str, max_bytes: int) -> dict[str, Any]:
+    """Downloads a Drive file (exporting Docs, Sheets and Slides to Office formats) so it parses like an upload.
+    `title` is what the user sees; `parse_name` tells the parser which format the bytes are."""
+    meta = drive_service.files().get(fileId=file_id, fields="id, name, mimeType, size, webViewLink").execute()
+    title = meta.get("name", "Untitled")
+    mime_type = meta.get("mimeType", "application/octet-stream")
+    parse_name = title
+    file_type = title.rsplit(".", 1)[-1].lower() if "." in title else "unknown"
+    if mime_type in GOOGLE_EXPORTS:
+        file_type, mime_type, extension = GOOGLE_EXPORTS[mime_type]
+        parse_name = title + extension
+        request = drive_service.files().export_media(fileId=file_id, mimeType=mime_type)
+    elif mime_type.startswith("application/vnd.google-apps."):
+        raise UnsupportedDriveFile(title)
+    else:
+        request = drive_service.files().get_media(fileId=file_id)
+    data = request.execute()
+    if len(data) > max_bytes:
+        raise ValueError(f"File is larger than the {max_bytes // (1024 * 1024)} MB size limit set by your admin")
+    return {
+        "title": title,
+        "file_type": file_type,
+        "mime_type": mime_type,
+        "parse_name": parse_name,
+        "data": data,
+    }
+
+
 def fetch_drive_permissions(drive_service: Any, file_id: str) -> list[dict[str, Any]]:
     """Fetches all direct user/domain grants; Google API errors propagate to prevent false revocations."""
     grants = []

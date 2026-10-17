@@ -384,6 +384,89 @@ def delete_drive_sync_state(conn: Connection, user_id: uuid.UUID) -> None:
     execute(conn, "DELETE FROM drive_sync_state WHERE user_id = %(user_id)s", {"user_id": user_id})
 
 
+def mark_drive_file_dirty(
+    conn: Connection, *, document_id: uuid.UUID, user_id: uuid.UUID, drive_file_id: str
+) -> None:
+    """Records a change to an indexed file. Every call restarts its quiet period."""
+    execute(
+        conn,
+        """
+        INSERT INTO drive_pending_reindex (document_id, user_id, drive_file_id)
+        VALUES (%(document_id)s, %(user_id)s, %(drive_file_id)s)
+        ON CONFLICT (document_id) DO UPDATE SET last_change_at = now(), attempts = 0
+        """,
+        {"document_id": document_id, "user_id": user_id, "drive_file_id": drive_file_id},
+    )
+
+
+def claim_due_reindexes(
+    conn: Connection, *, quiet_seconds: int, max_wait_seconds: int, limit: int, max_attempts: int = 5
+) -> list[Row]:
+    """Leases files whose changes have stopped for `quiet_seconds` (or that have waited `max_wait_seconds`
+    since their first change). A lease lasts 15 minutes, so a crashed run is picked up again."""
+    return fetch_all(
+        conn,
+        """
+        UPDATE drive_pending_reindex p
+        SET claimed_at = now()
+        WHERE p.document_id IN (
+            SELECT document_id FROM drive_pending_reindex
+            WHERE (last_change_at <= now() - make_interval(secs => %(quiet)s)
+                   OR first_change_at <= now() - make_interval(secs => %(max_wait)s))
+              AND (claimed_at IS NULL OR claimed_at <= now() - interval '15 minutes')
+              AND attempts < %(max_attempts)s
+            ORDER BY last_change_at
+            LIMIT %(limit)s
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING p.document_id, p.user_id, p.drive_file_id, p.last_change_at
+        """,
+        {"quiet": quiet_seconds, "max_wait": max_wait_seconds, "limit": limit, "max_attempts": max_attempts},
+    )
+
+
+def finish_reindex(conn: Connection, document_id: uuid.UUID, claimed_change_at: datetime) -> bool:
+    """Removes the pending row unless the file changed again after it was claimed. In that case the row
+    stays (with a fresh max-wait clock) and False is returned."""
+    row = fetch_one(
+        conn,
+        "DELETE FROM drive_pending_reindex WHERE document_id = %(id)s AND last_change_at = %(at)s RETURNING 1 AS ok",
+        {"id": document_id, "at": claimed_change_at},
+    )
+    if row:
+        return True
+    execute(
+        conn,
+        """
+        UPDATE drive_pending_reindex SET claimed_at = NULL, first_change_at = now(), attempts = 0
+        WHERE document_id = %(id)s
+        """,
+        {"id": document_id},
+    )
+    return False
+
+
+def release_failed_reindex(conn: Connection, document_id: uuid.UUID) -> None:
+    execute(
+        conn,
+        "UPDATE drive_pending_reindex SET claimed_at = NULL, attempts = attempts + 1 WHERE document_id = %(id)s",
+        {"id": document_id},
+    )
+
+
+def update_document_content(
+    conn: Connection, document_id: uuid.UUID, *, title: str, file_size_bytes: int, sha256: str
+) -> None:
+    execute(
+        conn,
+        """
+        UPDATE documents SET title = %(title)s, file_size_bytes = %(size)s, sha256 = %(sha256)s, updated_at = now()
+        WHERE id = %(id)s
+        """,
+        {"id": document_id, "title": title, "size": file_size_bytes, "sha256": sha256},
+    )
+
+
 def list_documents(
     conn: Connection,
     *,

@@ -1,5 +1,6 @@
 """Google Drive API router: importing files the user picked with Google's Picker."""
 
+import hashlib
 import hmac
 import logging
 from typing import Any
@@ -68,33 +69,16 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
         title = file_id
         doc_id = None  # so a failure here never marks the previous file's document as failed
         try:
-            # Get file metadata
-            file_meta = (
-                drive_service.files()
-                .get(fileId=file_id, fields="id, name, mimeType, size, webViewLink")
-                .execute()
-            )
-            filename = file_meta.get("name", "Untitled")
-            mime_type = file_meta.get("mimeType", "application/octet-stream")
-
-            # Google Docs, Sheets and Slides are exported to Word, Excel and PowerPoint so they parse like uploads.
-            # `title` is what the user sees; `parse_name` tells the parser which format the bytes are.
-            title = filename
-            parse_name = filename
-            file_type = filename.rsplit(".", 1)[-1].lower() if "." in filename else "unknown"
-            if mime_type in drive.GOOGLE_EXPORTS:
-                file_type, mime_type, extension = drive.GOOGLE_EXPORTS[mime_type]
-                parse_name = filename + extension
-                request_obj = drive_service.files().export_media(fileId=file_id, mimeType=mime_type)
-            elif mime_type.startswith("application/vnd.google-apps."):
-                skipped.append(filename)  # Forms, Drawings, Sites and so on have nothing to index
+            try:
+                downloaded = drive.download_file(drive_service, file_id, max_bytes)
+            except drive.UnsupportedDriveFile as unsupported:
+                skipped.append(str(unsupported))  # Forms, Drawings, Sites and so on have nothing to index
                 continue
-            else:
-                request_obj = drive_service.files().get_media(fileId=file_id)
-
-            file_bytes = request_obj.execute()
-            if len(file_bytes) > max_bytes:
-                raise ValueError(f"File is larger than the {max_bytes // (1024 * 1024)} MB size limit set by your admin")
+            title = downloaded["title"]
+            file_type = downloaded["file_type"]
+            mime_type = downloaded["mime_type"]
+            parse_name = downloaded["parse_name"]
+            file_bytes = downloaded["data"]
 
             # Fetch file permissions
             grants = drive.fetch_drive_permissions(drive_service, file_id)
@@ -103,8 +87,6 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
 
             # Process upload without re-uploading to Drive (since it's already in Drive)
             # We can invoke pipeline steps directly or via process_document_upload with sync_to_drive=False
-            import hashlib
-
             checksum = hashlib.sha256(file_bytes).hexdigest()
             size_bytes = len(file_bytes)
 
@@ -195,6 +177,21 @@ def drive_webhook(request: Request, conn: DbDep) -> Response:
             detail="Drive sync will be retried",
         ) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/sync/reindex-due")
+def reindex_due_files(request: Request, settings: SettingsDep, conn: DbDep) -> dict[str, int]:
+    """Re-indexes files whose Drive changes have stopped; intended for a Cloud Scheduler request every minute."""
+    secret = settings.drive_sync_admin_secret.get_secret_value()
+    supplied_secret = request.headers.get("X-Amber-Drive-Sync-Secret", "")
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Drive sync is not configured",
+        )
+    if not supplied_secret or not hmac.compare_digest(secret, supplied_secret):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    return drive_sync.reindex_due_files(conn, settings)
 
 
 @router.post("/sync/renew")

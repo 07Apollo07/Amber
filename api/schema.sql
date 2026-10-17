@@ -112,6 +112,19 @@ CREATE TABLE IF NOT EXISTS drive_sync_state (
 );
 CREATE INDEX IF NOT EXISTS ix_drive_sync_state_expiration ON drive_sync_state (channel_expires);
 
+-- Debounce queue: a webhook upserts a row and moves last_change_at to now(); the file is re-indexed once
+-- last_change_at is older than the quiet period (or first_change_at older than the max wait).
+CREATE TABLE IF NOT EXISTS drive_pending_reindex (
+    document_id      uuid PRIMARY KEY REFERENCES documents (id) ON DELETE CASCADE,
+    user_id          uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    drive_file_id    varchar(255) NOT NULL,
+    first_change_at  timestamptz NOT NULL DEFAULT now(),
+    last_change_at   timestamptz NOT NULL DEFAULT now(),
+    claimed_at       timestamptz,
+    attempts         integer NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_drive_pending_reindex_last_change ON drive_pending_reindex (last_change_at);
+
 CREATE TABLE IF NOT EXISTS chunks (
     id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id  uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
@@ -254,6 +267,7 @@ BEGIN
     GRANT SELECT, INSERT, UPDATE, DELETE ON documents TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON document_access TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON drive_sync_state TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON drive_pending_reindex TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON chunks TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON collections TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON collection_documents TO amber_app;

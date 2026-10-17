@@ -14,7 +14,7 @@ WEB_SA="amber-web@$PROJECT_ID.iam.gserviceaccount.com"
 WEB_URL="https://amber-web-$PROJECT_NUMBER.$REGION.run.app"
 API_URL="https://amber-api-$PROJECT_NUMBER.$REGION.run.app"
 KMS_KEY="projects/$PROJECT_ID/locations/$REGION/keyRings/amber/cryptoKeys/oauth-tokens"
-SECRETS=(amber-oauth-client-secret amber-firebase-web-api-key amber-gemini-api-key amber-state-cookie-key amber-database-dsn amber-litellm-api-key)
+SECRETS=(amber-oauth-client-secret amber-firebase-web-api-key amber-gemini-api-key amber-state-cookie-key amber-database-dsn amber-litellm-api-key amber-drive-sync-secret)
 
 setup() {  # one time
   gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
@@ -46,6 +46,8 @@ secrets() {  # prompts for each value; nothing is echoed or written to disk
     case "$s" in
       amber-state-cookie-key) echo "$s: generating a new Fernet key"
         python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode(), end='')" | gcloud secrets versions add "$s" --data-file=- ;;
+      amber-drive-sync-secret) echo "$s: generating a random secret (Cloud Scheduler sends it as X-Amber-Drive-Sync-Secret)"
+        python3 -c "import secrets; print(secrets.token_urlsafe(32), end='')" | gcloud secrets versions add "$s" --data-file=- ;;
       amber-database-dsn) echo "Format: postgresql://amber_app:<password>@/<dbname>?host=/cloudsql/$PROJECT_ID:$REGION:$SQL_INSTANCE"
         read -rsp "$s: " v; echo; printf %s "$v" | gcloud secrets versions add "$s" --data-file=- ;;
       *) read -rsp "$s: " v; echo; printf %s "$v" | gcloud secrets versions add "$s" --data-file=- ;;
@@ -80,7 +82,7 @@ YAML
     --allow-unauthenticated --ingress all --add-cloudsql-instances "$PROJECT_ID:$REGION:$SQL_INSTANCE" \
     --memory 1Gi --cpu 1 --timeout 300 --concurrency 10 --min-instances 0 --max-instances 3 --port 8000 \
     --env-vars-file "$envfile" \
-    --set-secrets "AMBER_GOOGLE_OAUTH_CLIENT_SECRET=amber-oauth-client-secret:latest,AMBER_FIREBASE_WEB_API_KEY=amber-firebase-web-api-key:latest,AMBER_GEMINI_API_KEY=amber-gemini-api-key:latest,AMBER_STATE_COOKIE_KEY=amber-state-cookie-key:latest,AMBER_DATABASE_DSN=amber-database-dsn:latest,AMBER_LITELLM_API_KEY=amber-litellm-api-key:latest"
+    --set-secrets "AMBER_GOOGLE_OAUTH_CLIENT_SECRET=amber-oauth-client-secret:latest,AMBER_FIREBASE_WEB_API_KEY=amber-firebase-web-api-key:latest,AMBER_GEMINI_API_KEY=amber-gemini-api-key:latest,AMBER_STATE_COOKIE_KEY=amber-state-cookie-key:latest,AMBER_DATABASE_DSN=amber-database-dsn:latest,AMBER_LITELLM_API_KEY=amber-litellm-api-key:latest,AMBER_DRIVE_SYNC_ADMIN_SECRET=amber-drive-sync-secret:latest"
   gcloud run deploy amber-web --image "$REPO/web:$tag" --region "$REGION" --service-account "$WEB_SA" \
     --allow-unauthenticated --memory 512Mi --min-instances 0 --max-instances 3 --port 3000 \
     --set-env-vars "AMBER_API_ORIGIN=$API_URL"

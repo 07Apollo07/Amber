@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # the Next.js dev server's /api rewrite locally). OAuth redirects are built from it.
     public_base_url: str = "http://localhost:3000"
     drive_sync_admin_secret: SecretStr = SecretStr("")
+    # A changed Drive file is re-indexed once no change has arrived for this long...
+    drive_reindex_quiet_seconds: int = 300
+    # ...or, if it never goes quiet, this long after its first change.
+    drive_reindex_max_wait_seconds: int = 3600
 
     # Google OAuth web client (must be the client configured for Firebase's Google provider).
     google_oauth_client_id: str = ""
