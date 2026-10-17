@@ -903,7 +903,7 @@ export function ChatLayout() {
   }
 
   return (
-    <div className="grid h-[calc(100dvh-7.5rem)] min-h-[520px] w-full grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,4fr)] xl:grid-cols-[minmax(0,1fr)_minmax(0,3fr)_minmax(260px,1fr)]">
+    <div className="grid h-[calc(100dvh-5.5rem)] min-h-[520px] w-full grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,4fr)] xl:grid-cols-[minmax(0,1fr)_minmax(0,3fr)_minmax(260px,1fr)]">
       <aside className="hidden min-w-0 flex-col overflow-hidden rounded-2xl border bg-card/70 p-3 lg:flex">
         <div className="mb-2 flex items-center justify-between border-b px-1 pb-3">
           <span className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">

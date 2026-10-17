@@ -180,15 +180,18 @@ export function UploadPage() {
     <div className="grid gap-6 lg:grid-cols-[1fr_380px] lg:items-start">
       <aside className="space-y-6 lg:sticky lg:top-20 lg:col-start-2 lg:row-start-1 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto lg:pr-1">
         <section aria-label="Add files">
-          <Tabs defaultValue="computer">
+          <Tabs defaultValue="drive">
             <TabsList className="mb-4">
-              <TabsTrigger value="computer">
-                <HardDrive /> From computer
-              </TabsTrigger>
               <TabsTrigger value="drive">
                 <Cloud /> From Google Drive
               </TabsTrigger>
+              <TabsTrigger value="computer">
+                <HardDrive /> From computer
+              </TabsTrigger>
             </TabsList>
+            <TabsContent value="drive">
+              <DrivePickerPanel onImported={() => void refresh()} />
+            </TabsContent>
             <TabsContent value="computer" className="space-y-3">
               {driveConnected && (
                 <div className="flex items-start gap-2 rounded-xl border border-info/25 bg-info/8 px-3 py-2.5 text-sm">
@@ -200,9 +203,6 @@ export function UploadPage() {
                 </div>
               )}
               <Dropzone onFiles={uploadFiles} />
-            </TabsContent>
-            <TabsContent value="drive">
-              <DrivePickerPanel onImported={() => void refresh()} />
             </TabsContent>
           </Tabs>
         </section>

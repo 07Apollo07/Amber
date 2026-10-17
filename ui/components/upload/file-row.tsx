@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { Building2, ChevronRight, ExternalLink, Lock, Settings2, UsersRound, X } from "lucide-react"
+import { Building2, ChevronRight, ExternalLink, FolderPlus, Lock, Settings2, UsersRound, X } from "lucide-react"
 
 import { StatusBadge } from "@/components/app/status-badge"
 import { Button } from "@/components/ui/button"
@@ -10,12 +10,16 @@ import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Progress } from "@/components/ui/progress"
 import { formatBytes } from "@/lib/format"
 import type { Collection, Sharing, UploadRow } from "@/lib/types"
 import { cn } from "@/lib/utils"
+
+import { CollectionNameDialog } from "./collection-dialogs"
 
 export function sharingLabel(sharing: Sharing) {
   if (sharing.kind === "domain") return { icon: Building2, text: `Everyone at @${sharing.domain}` }
@@ -40,14 +44,17 @@ export function FileRow({
   onRemove,
   onManage,
   onToggleCollection,
+  onChanged,
 }: {
   row: UploadRow
   collections: Collection[]
   onRemove: (id: string) => void
   onManage: (row: UploadRow) => void
   onToggleCollection: (row: UploadRow, collectionId: string, included: boolean) => void
+  onChanged?: () => void
 }) {
   const [open, setOpen] = useState(false)
+  const [creating, setCreating] = useState(false)
   const inProgress = row.status !== "ready" && row.status !== "failed"
   const { icon: ShareIcon, text } = sharingLabel(row.sharing)
 
@@ -99,14 +106,14 @@ export function FileRow({
             </a>
           </Button>
         )}
-        {row.saved && collections.length > 0 && (
+        {row.saved && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="sm" aria-label={`Choose collections for ${row.name}`}>
-                Collections{row.collections.length > 0 ? ` · ${row.collections.length}` : ""}
+                Collections · {row.collections.length}
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            <DropdownMenuContent align="end" className="w-64">
               {collections.map((collection) => (
                 <DropdownMenuCheckboxItem
                   key={collection.id}
@@ -116,8 +123,26 @@ export function FileRow({
                   {collection.name}
                 </DropdownMenuCheckboxItem>
               ))}
+              {collections.length > 0 && <DropdownMenuSeparator />}
+              <DropdownMenuItem
+                onSelect={(event) => {
+                  event.preventDefault()
+                  setCreating(true)
+                }}
+              >
+                <FolderPlus className="size-4" /> New collection
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+        )}
+        {creating && (
+          <CollectionNameDialog
+            onClose={() => setCreating(false)}
+            onDone={onChanged ?? (() => {})}
+            onCreated={(created) => {
+              void onToggleCollection(row, created.id, true)
+            }}
+          />
         )}
         {row.saved && row.isOwner && (
           <Button variant="outline" size="sm" onClick={() => onManage(row)}>

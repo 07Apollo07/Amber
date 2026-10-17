@@ -96,6 +96,7 @@ export function ManageFiles({
       onRemove={onRemovePending}
       onManage={onManage}
       onToggleCollection={(file, collectionId, included) => void toggleCollection(file, collectionId, included)}
+      onChanged={onChanged}
     />
   )
 
@@ -114,65 +115,11 @@ export function ManageFiles({
           className="rounded-2xl border border-dashed"
         />
       ) : (
-        <Tabs defaultValue="collections">
+        <Tabs defaultValue="files">
           <TabsList>
-            <TabsTrigger value="collections">Collections</TabsTrigger>
             <TabsTrigger value="files">File management</TabsTrigger>
+            <TabsTrigger value="collections">Collections</TabsTrigger>
           </TabsList>
-
-          <TabsContent value="collections" className="space-y-4">
-            <div className="flex justify-end">
-              <Button variant="outline" onClick={() => setDialog({ kind: "create" })}>
-                <FolderPlus /> New collection
-              </Button>
-            </div>
-            {collections.length === 0 ? (
-              <p className="py-8 text-center text-sm text-muted-foreground">
-                No collections yet. Create one to organize files and share them with collaborators.
-              </p>
-            ) : (
-              <div className="space-y-3">
-                {collections.map((collection) => {
-                  const rows = saved.filter((row) => row.collections.some((item) => item.id === collection.id))
-                  return (
-                    <FolderGroup
-                      key={collection.id}
-                      id={collection.id}
-                      title={collection.name}
-                      rows={rows}
-                      collections={collections}
-                      open={!closed.has(collection.id)}
-                      onOpenChange={(open) => toggleFolder(collection.id, open)}
-                      onManage={onManage}
-                      onRemove={onRemovePending}
-                      onToggleCollection={toggleCollection}
-                      menu={collection.isOwner ? (
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon-sm" aria-label={`${collection.name} options`}>
-                              <MoreHorizontal />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem onSelect={() => setDialog({ kind: "share", collection })}>
-                              <Share2 /> Share collection
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onSelect={() => setDialog({ kind: "rename", collection })}>
-                              <Pencil /> Rename
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem variant="destructive" onSelect={() => setDialog({ kind: "delete", collection })}>
-                              <Trash2 /> Delete collection
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      ) : null}
-                    />
-                  )
-                })}
-              </div>
-            )}
-          </TabsContent>
 
           <TabsContent value="files" className="space-y-4">
             <div className="flex flex-col gap-2 sm:flex-row">
@@ -263,6 +210,61 @@ export function ManageFiles({
               </TabsContent>
             </Tabs>
           </TabsContent>
+
+          <TabsContent value="collections" className="space-y-4">
+            <div className="flex justify-end">
+              <Button variant="outline" onClick={() => setDialog({ kind: "create" })}>
+                <FolderPlus /> New collection
+              </Button>
+            </div>
+            {collections.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                No collections yet. Create one to organize files and share them with collaborators.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {collections.map((collection) => {
+                  const rows = saved.filter((row) => row.collections.some((item) => item.id === collection.id))
+                  return (
+                    <FolderGroup
+                      key={collection.id}
+                      id={collection.id}
+                      title={collection.name}
+                      rows={rows}
+                      collections={collections}
+                      open={!closed.has(collection.id)}
+                      onOpenChange={(open) => toggleFolder(collection.id, open)}
+                      onManage={onManage}
+                      onRemove={onRemovePending}
+                      onToggleCollection={toggleCollection}
+                      onChanged={onChanged}
+                      menu={collection.isOwner ? (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon-sm" aria-label={`${collection.name} options`}>
+                              <MoreHorizontal />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onSelect={() => setDialog({ kind: "share", collection })}>
+                              <Share2 /> Share collection
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => setDialog({ kind: "rename", collection })}>
+                              <Pencil /> Rename
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem variant="destructive" onSelect={() => setDialog({ kind: "delete", collection })}>
+                              <Trash2 /> Delete collection
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      ) : null}
+                    />
+                  )
+                })}
+              </div>
+            )}
+          </TabsContent>
         </Tabs>
       )}
 
@@ -299,6 +301,7 @@ function FolderGroup({
   onManage,
   onRemove,
   onToggleCollection,
+  onChanged,
   menu,
 }: {
   id: string
@@ -310,6 +313,7 @@ function FolderGroup({
   onManage: (row: UploadRow) => void
   onRemove: (id: string) => void
   onToggleCollection: (row: UploadRow, collectionId: string, included: boolean) => Promise<void>
+  onChanged: () => void
   menu?: React.ReactNode
 }) {
   const Icon = open ? FolderOpen : Folder
@@ -343,6 +347,7 @@ function FolderGroup({
                 onToggleCollection={(file, collectionId, included) =>
                   void onToggleCollection(file, collectionId, included)
                 }
+                onChanged={onChanged}
               />
             ))}
           </ul>

@@ -35,10 +35,12 @@ export function CollectionNameDialog({
   collection,
   onClose,
   onDone,
+  onCreated,
 }: {
   collection?: Collection
   onClose: () => void
   onDone: () => void
+  onCreated?: (created: { id: string; name: string }) => void
 }) {
   const [name, setName] = useState(collection?.name ?? "")
   const { busy, run } = useAction(() => {
@@ -54,7 +56,9 @@ export function CollectionNameDialog({
         await apiPut(`/api/collections/${collection.id}`, { name: trimmed })
         return "Collection renamed"
       }
-      await apiPost("/api/collections", { name: trimmed })
+      const res = await apiPost("/api/collections", { name: trimmed })
+      const created = (await res.json()) as { id: string; name: string }
+      if (onCreated) onCreated(created)
       return "Collection created"
     })
   }
