@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from amber import repository
 from amber.models import can_manage_drive_sharing, drive_connected
-from amber.util import audit, firebase, google_oauth
+from amber.util import audit, drive_sync, firebase, google_oauth
 from amber.util.config import Settings
 from amber.util.crypto import decrypt_token, encrypt_token
 from amber.util.db import Connection
@@ -268,6 +268,12 @@ def google_callback(
     )
     conn.commit()
 
+    if has_refresh_token and drive_connected(True, tokens["scopes"]):
+        try:
+            drive_sync.ensure_drive_watch(user["id"], conn, settings)
+        except Exception as exc:
+            log.warning("Could not start Drive change notifications for user %s: %s", user["id"], exc)
+
     print("SUCCESS: redirecting to return_to:", pending["return_to"])
     response = _same_site_redirect(pending["return_to"])
     set_session_cookies(response, settings, session_cookie)
@@ -313,6 +319,8 @@ def disconnect_drive(request: Request, user: CurrentUser, settings: SettingsDep,
     the grant may still exist at Google, so the UI can point the user to their Google account.
     """
     stored = repository.get_token(conn, user["id"])
+    drive_sync.stop_drive_watch(user["id"], conn)
+    repository.delete_drive_sync_state(conn, user["id"])
     revoked = True
     if stored is not None:
         try:

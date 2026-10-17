@@ -9,6 +9,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from amber import repository
+from amber.ingest import pipeline
+from amber.ingest import settings as indexing_settings
 from amber.util import drive
 from amber.util.config import Settings
 from amber.util.db import Connection
@@ -179,7 +181,14 @@ def process_drive_changes(conn: Connection, sync_state: dict[str, Any]) -> int:
             if not document:
                 continue
 
-            if change.get("removed") or file.get("trashed"):
+            removed = bool(change.get("removed") or file.get("trashed"))
+            if not removed:
+                # Content may have changed: (re)start this file's quiet period. Re-indexing happens later.
+                repository.mark_drive_file_dirty(
+                    conn, document_id=document["id"], user_id=user_id, drive_file_id=file_id
+                )
+
+            if removed:
                 grants = [{"grant_type": "user", "grantee": user["email"].lower()}]
             else:
                 try:
@@ -225,6 +234,81 @@ def process_drive_changes(conn: Connection, sync_state: dict[str, Any]) -> int:
     repository.advance_drive_sync_cursor(conn, user_id, next_start_token)
     conn.commit()
     return len(processed_files)
+
+
+def reindex_due_files(conn: Connection, settings: Settings, *, limit: int = 20) -> dict[str, int]:
+    """Re-indexes files that haven't changed for the quiet period. Safe to run concurrently."""
+    claimed = repository.claim_due_reindexes(
+        conn,
+        quiet_seconds=settings.drive_reindex_quiet_seconds,
+        max_wait_seconds=settings.drive_reindex_max_wait_seconds,
+        limit=limit,
+    )
+    conn.commit()  # persist the leases before the slow work
+
+    counts = {"reindexed": 0, "unchanged": 0, "deferred": 0, "failed": 0}
+    for item in claimed:
+        document_id = item["document_id"]
+        try:
+            outcome = _reindex_one(conn, item)
+        except Exception as exc:
+            conn.rollback()
+            log.warning("Re-indexing Drive file %s failed: %s: %s", item["drive_file_id"], type(exc).__name__, exc)
+            try:
+                if isinstance(exc, pipeline.IndexingError):
+                    repository.update_document_status(conn, document_id, "failed", status_message=str(exc)[:2000])
+                repository.release_failed_reindex(conn, document_id)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            counts["failed"] += 1
+            continue
+        counts[outcome] += 1
+    return counts
+
+
+def _reindex_one(conn: Connection, item: dict[str, Any]) -> str:
+    user_id = item["user_id"]
+    document_id = item["document_id"]
+    user = repository.get_user(conn, user_id)
+    document = repository.get_document(conn, document_id)
+    if not user or not document:
+        repository.finish_reindex(conn, document_id, item["last_change_at"])
+        conn.commit()
+        return "unchanged"
+    repository.set_app_user_context(conn, user["email"], user.get("domain"))
+
+    service = drive.build_drive_service(user_id, conn)
+    if service is None:
+        raise DriveSyncError("Google Drive is not connected for this user")
+
+    max_bytes = indexing_settings.load(conn).max_upload_bytes
+    downloaded = drive.download_file(service, item["drive_file_id"], max_bytes)
+    checksum = hashlib.sha256(downloaded["data"]).hexdigest()
+
+    if checksum == document["sha256"]:
+        # Only metadata or permissions changed, so the indexed text is still current.
+        quiet = repository.finish_reindex(conn, document_id, item["last_change_at"])
+        conn.commit()
+        return "unchanged" if quiet else "deferred"
+
+    repository.update_document_status(conn, document_id, "indexing")
+    conn.commit()
+    repository.set_app_user_context(conn, user["email"], user.get("domain"))
+    pipeline.index_document_content(
+        conn, document_id, downloaded["data"], downloaded["mime_type"], downloaded["parse_name"]
+    )
+    repository.update_document_content(
+        conn,
+        document_id,
+        title=downloaded["title"],
+        file_size_bytes=len(downloaded["data"]),
+        sha256=checksum,
+    )
+    repository.update_document_status(conn, document_id, "indexed")
+    repository.finish_reindex(conn, document_id, item["last_change_at"])
+    conn.commit()
+    return "reindexed"
 
 
 def validate_notification(sync_state: dict[str, Any], token: str | None, resource_id: str | None) -> bool:

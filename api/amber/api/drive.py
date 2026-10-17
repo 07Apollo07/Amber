@@ -1,19 +1,21 @@
 """Google Drive API router: importing files the user picked with Google's Picker."""
 
+import hashlib
+import hmac
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
 from amber import repository
 from amber.api.documents import apply_organization
 from amber.ingest import settings as indexing_settings
 from amber.ingest.pipeline import IndexingError, index_document_content, mark_document_failed
-from amber.util import drive
+from amber.util import drive, drive_sync
 from amber.util.config import get_settings
 from amber.util.ratelimit import limit
-from amber.util.security import CsrfProtected, CurrentUser, DbDep
+from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +56,11 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
     if not drive_service:
         raise HTTPException(status_code=400, detail="Google Drive is not connected for this user")
 
+    try:
+        drive_sync.ensure_drive_watch(user["id"], conn, get_settings())
+    except drive_sync.DriveSyncError as exc:
+        log.warning("Could not start Drive change notifications for user %s: %s", user["id"], exc)
+
     max_bytes = indexing_settings.load(conn).max_upload_bytes
     imported = []
     skipped: list[str] = []
@@ -62,33 +69,16 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
         title = file_id
         doc_id = None  # so a failure here never marks the previous file's document as failed
         try:
-            # Get file metadata
-            file_meta = (
-                drive_service.files()
-                .get(fileId=file_id, fields="id, name, mimeType, size, webViewLink")
-                .execute()
-            )
-            filename = file_meta.get("name", "Untitled")
-            mime_type = file_meta.get("mimeType", "application/octet-stream")
-
-            # Google Docs, Sheets and Slides are exported to Word, Excel and PowerPoint so they parse like uploads.
-            # `title` is what the user sees; `parse_name` tells the parser which format the bytes are.
-            title = filename
-            parse_name = filename
-            file_type = filename.rsplit(".", 1)[-1].lower() if "." in filename else "unknown"
-            if mime_type in drive.GOOGLE_EXPORTS:
-                file_type, mime_type, extension = drive.GOOGLE_EXPORTS[mime_type]
-                parse_name = filename + extension
-                request_obj = drive_service.files().export_media(fileId=file_id, mimeType=mime_type)
-            elif mime_type.startswith("application/vnd.google-apps."):
-                skipped.append(filename)  # Forms, Drawings, Sites and so on have nothing to index
+            try:
+                downloaded = drive.download_file(drive_service, file_id, max_bytes)
+            except drive.UnsupportedDriveFile as unsupported:
+                skipped.append(str(unsupported))  # Forms, Drawings, Sites and so on have nothing to index
                 continue
-            else:
-                request_obj = drive_service.files().get_media(fileId=file_id)
-
-            file_bytes = request_obj.execute()
-            if len(file_bytes) > max_bytes:
-                raise ValueError(f"File is larger than the {max_bytes // (1024 * 1024)} MB size limit set by your admin")
+            title = downloaded["title"]
+            file_type = downloaded["file_type"]
+            mime_type = downloaded["mime_type"]
+            parse_name = downloaded["parse_name"]
+            file_bytes = downloaded["data"]
 
             # Fetch file permissions
             grants = drive.fetch_drive_permissions(drive_service, file_id)
@@ -97,8 +87,6 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
 
             # Process upload without re-uploading to Drive (since it's already in Drive)
             # We can invoke pipeline steps directly or via process_document_upload with sync_to_drive=False
-            import hashlib
-
             checksum = hashlib.sha256(file_bytes).hexdigest()
             size_bytes = len(file_bytes)
 
@@ -165,3 +153,68 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
     )
     conn.commit()
     return {"success": True, "imported": imported, "skipped": skipped, "failed": failed}
+
+
+@router.post("/webhook", status_code=status.HTTP_204_NO_CONTENT)
+def drive_webhook(request: Request, conn: DbDep) -> Response:
+    """Google notifications are hints; fetch and reconcile the authoritative changes feed."""
+    channel_id = request.headers.get("X-Goog-Channel-ID")
+    sync_state = repository.get_drive_sync_state_by_channel(conn, channel_id or "")
+    if not sync_state or not drive_sync.validate_notification(
+        sync_state,
+        request.headers.get("X-Goog-Channel-Token"),
+        request.headers.get("X-Goog-Resource-ID"),
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown Drive notification channel")
+
+    try:
+        drive_sync.process_drive_changes(conn, sync_state)
+    except Exception as exc:
+        conn.rollback()
+        log.exception("Drive notification processing failed for user %s", sync_state["user_id"])
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Drive sync will be retried",
+        ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/sync/reindex-due")
+def reindex_due_files(request: Request, settings: SettingsDep, conn: DbDep) -> dict[str, int]:
+    """Re-indexes files whose Drive changes have stopped; intended for a Cloud Scheduler request every minute."""
+    secret = settings.drive_sync_admin_secret.get_secret_value()
+    supplied_secret = request.headers.get("X-Amber-Drive-Sync-Secret", "")
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Drive sync is not configured",
+        )
+    if not supplied_secret or not hmac.compare_digest(secret, supplied_secret):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    return drive_sync.reindex_due_files(conn, settings)
+
+
+@router.post("/sync/renew")
+def renew_drive_watches(request: Request, settings: SettingsDep, conn: DbDep) -> dict[str, int]:
+    """Renew expiring watch channels; intended for a daily Cloud Scheduler request."""
+    secret = settings.drive_sync_admin_secret.get_secret_value()
+    supplied_secret = request.headers.get("X-Amber-Drive-Sync-Secret", "")
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Drive sync renewal is not configured",
+        )
+    if not supplied_secret or not hmac.compare_digest(secret, supplied_secret):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+    due_users = repository.list_drive_sync_users_due_for_renewal(conn)
+    renewed = 0
+    failed = 0
+    for row in due_users:
+        try:
+            renewed += int(drive_sync.ensure_drive_watch(row["user_id"], conn, settings, force=True))
+        except Exception:
+            conn.rollback()
+            failed += 1
+            log.exception("Could not renew Drive watch for user %s", row["user_id"])
+    return {"renewed": renewed, "failed": failed}

@@ -304,6 +304,169 @@ def get_document_by_drive_file_id(conn: Connection, owner_id: uuid.UUID, drive_f
     )
 
 
+def get_drive_sync_state(conn: Connection, user_id: uuid.UUID) -> Row | None:
+    return fetch_one(
+        conn,
+        "SELECT * FROM drive_sync_state WHERE user_id = %(user_id)s FOR UPDATE",
+        {"user_id": user_id},
+    )
+
+
+def get_drive_sync_state_by_channel(conn: Connection, channel_id: str) -> Row | None:
+    return fetch_one(
+        conn,
+        "SELECT * FROM drive_sync_state WHERE channel_id = %(channel_id)s FOR UPDATE",
+        {"channel_id": channel_id},
+    )
+
+
+def save_drive_sync_state(
+    conn: Connection,
+    *,
+    user_id: uuid.UUID,
+    page_token: str,
+    channel_id: str,
+    resource_id: str,
+    token_hash: str,
+    channel_expires: datetime,
+) -> None:
+    execute(
+        conn,
+        """
+        INSERT INTO drive_sync_state
+            (user_id, page_token, channel_id, resource_id, token_hash, channel_expires, updated_at)
+        VALUES
+            (%(user_id)s, %(page_token)s, %(channel_id)s, %(resource_id)s, %(token_hash)s,
+             %(channel_expires)s, now())
+        ON CONFLICT (user_id) DO UPDATE SET
+            page_token = EXCLUDED.page_token,
+            channel_id = EXCLUDED.channel_id,
+            resource_id = EXCLUDED.resource_id,
+            token_hash = EXCLUDED.token_hash,
+            channel_expires = EXCLUDED.channel_expires,
+            updated_at = now()
+        """,
+        {
+            "user_id": user_id,
+            "page_token": page_token,
+            "channel_id": channel_id,
+            "resource_id": resource_id,
+            "token_hash": token_hash,
+            "channel_expires": channel_expires,
+        },
+    )
+
+
+def advance_drive_sync_cursor(conn: Connection, user_id: uuid.UUID, page_token: str) -> None:
+    execute(
+        conn,
+        """
+        UPDATE drive_sync_state
+        SET page_token = %(page_token)s, last_synced_at = now(), updated_at = now()
+        WHERE user_id = %(user_id)s
+        """,
+        {"user_id": user_id, "page_token": page_token},
+    )
+
+
+def list_drive_sync_users_due_for_renewal(conn: Connection) -> list[Row]:
+    return fetch_all(
+        conn,
+        """
+        SELECT user_id FROM drive_sync_state
+        WHERE channel_expires <= now() + interval '24 hours'
+        ORDER BY channel_expires
+        """,
+    )
+
+
+def delete_drive_sync_state(conn: Connection, user_id: uuid.UUID) -> None:
+    execute(conn, "DELETE FROM drive_sync_state WHERE user_id = %(user_id)s", {"user_id": user_id})
+
+
+def mark_drive_file_dirty(
+    conn: Connection, *, document_id: uuid.UUID, user_id: uuid.UUID, drive_file_id: str
+) -> None:
+    """Records a change to an indexed file. Every call restarts its quiet period."""
+    execute(
+        conn,
+        """
+        INSERT INTO drive_pending_reindex (document_id, user_id, drive_file_id)
+        VALUES (%(document_id)s, %(user_id)s, %(drive_file_id)s)
+        ON CONFLICT (document_id) DO UPDATE SET last_change_at = now(), attempts = 0
+        """,
+        {"document_id": document_id, "user_id": user_id, "drive_file_id": drive_file_id},
+    )
+
+
+def claim_due_reindexes(
+    conn: Connection, *, quiet_seconds: int, max_wait_seconds: int, limit: int, max_attempts: int = 5
+) -> list[Row]:
+    """Leases files whose changes have stopped for `quiet_seconds` (or that have waited `max_wait_seconds`
+    since their first change). A lease lasts 15 minutes, so a crashed run is picked up again."""
+    return fetch_all(
+        conn,
+        """
+        UPDATE drive_pending_reindex p
+        SET claimed_at = now()
+        WHERE p.document_id IN (
+            SELECT document_id FROM drive_pending_reindex
+            WHERE (last_change_at <= now() - make_interval(secs => %(quiet)s)
+                   OR first_change_at <= now() - make_interval(secs => %(max_wait)s))
+              AND (claimed_at IS NULL OR claimed_at <= now() - interval '15 minutes')
+              AND attempts < %(max_attempts)s
+            ORDER BY last_change_at
+            LIMIT %(limit)s
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING p.document_id, p.user_id, p.drive_file_id, p.last_change_at
+        """,
+        {"quiet": quiet_seconds, "max_wait": max_wait_seconds, "limit": limit, "max_attempts": max_attempts},
+    )
+
+
+def finish_reindex(conn: Connection, document_id: uuid.UUID, claimed_change_at: datetime) -> bool:
+    """Removes the pending row unless the file changed again after it was claimed. In that case the row
+    stays (with a fresh max-wait clock) and False is returned."""
+    row = fetch_one(
+        conn,
+        "DELETE FROM drive_pending_reindex WHERE document_id = %(id)s AND last_change_at = %(at)s RETURNING 1 AS ok",
+        {"id": document_id, "at": claimed_change_at},
+    )
+    if row:
+        return True
+    execute(
+        conn,
+        """
+        UPDATE drive_pending_reindex SET claimed_at = NULL, first_change_at = now(), attempts = 0
+        WHERE document_id = %(id)s
+        """,
+        {"id": document_id},
+    )
+    return False
+
+
+def release_failed_reindex(conn: Connection, document_id: uuid.UUID) -> None:
+    execute(
+        conn,
+        "UPDATE drive_pending_reindex SET claimed_at = NULL, attempts = attempts + 1 WHERE document_id = %(id)s",
+        {"id": document_id},
+    )
+
+
+def update_document_content(
+    conn: Connection, document_id: uuid.UUID, *, title: str, file_size_bytes: int, sha256: str
+) -> None:
+    execute(
+        conn,
+        """
+        UPDATE documents SET title = %(title)s, file_size_bytes = %(size)s, sha256 = %(sha256)s, updated_at = now()
+        WHERE id = %(id)s
+        """,
+        {"id": document_id, "title": title, "size": file_size_bytes, "sha256": sha256},
+    )
+
+
 def list_documents(
     conn: Connection,
     *,
@@ -384,23 +547,20 @@ def set_document_access(conn: Connection, document_id: uuid.UUID, grants: list[d
             continue
         if principal_type not in ("user", "domain"):
             continue
-        try:
-            execute(
-                conn,
-                """
-                INSERT INTO document_access (document_id, principal_type, principal_value, origin)
-                VALUES (%(document_id)s, %(principal_type)s, %(principal_value)s, %(origin)s)
-                ON CONFLICT (document_id, principal_type, principal_value) DO NOTHING
-                """,
-                {
-                    "document_id": document_id,
-                    "principal_type": principal_type,
-                    "principal_value": principal_value,
-                    "origin": origin,
-                },
-            )
-        except Exception:
-            pass
+        execute(
+            conn,
+            """
+            INSERT INTO document_access (document_id, principal_type, principal_value, origin)
+            VALUES (%(document_id)s, %(principal_type)s, %(principal_value)s, %(origin)s)
+            ON CONFLICT (document_id, principal_type, principal_value) DO NOTHING
+            """,
+            {
+                "document_id": document_id,
+                "principal_type": principal_type,
+                "principal_value": principal_value,
+                "origin": origin,
+            },
+        )
 
 
 def get_document_access(conn: Connection, document_id: uuid.UUID) -> list[Row]:
