@@ -58,6 +58,7 @@ def ensure_drive_watch(
     if not page_token:
         raise DriveSyncError("Google Drive did not return a start page token")
 
+    address = _webhook_address(settings)  # outside the try below, so its reason isn't hidden
     channel_id = str(uuid.uuid4())
     channel_token = secrets.token_urlsafe(32)
     try:
@@ -68,7 +69,7 @@ def ensure_drive_watch(
                 body={
                     "id": channel_id,
                     "type": "web_hook",
-                    "address": _webhook_address(settings),
+                    "address": address,
                     "token": channel_token,
                 },
             )
