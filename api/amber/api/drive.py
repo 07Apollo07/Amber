@@ -3,9 +3,10 @@
 import hashlib
 import hmac
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status, Request, Response
 from pydantic import BaseModel
 
 from amber import repository
@@ -20,6 +21,7 @@ from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep
 log = logging.getLogger(__name__)
 
 _picker_limit = Depends(limit("drive.picker", max_hits=30, window_seconds=60))
+_webhook_limit = Depends(limit("drive.webhook", max_hits=300, window_seconds=60))
 
 router = APIRouter(prefix="/api/drive", tags=["drive"])
 
@@ -50,7 +52,9 @@ def picker_token(user: CurrentUser, conn: DbDep) -> dict[str, Any]:
 
 
 @router.post("/import", dependencies=[CsrfProtected])
-def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) -> dict[str, Any]:
+def import_drive_files(
+    user: CurrentUser, conn: DbDep, req: DriveImportRequest, settings: SettingsDep
+) -> dict[str, Any]:
     """Imports files selected from Google Drive Picker, downloads content, fetches ACLs, and indexes them."""
     drive_service = drive.build_drive_service(user["id"], conn)
     if not drive_service:
@@ -65,6 +69,7 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
     imported = []
     skipped: list[str] = []
     failed: list[dict[str, str]] = []
+    sync_warning = None
     for file_id in req.file_ids:
         title = file_id
         doc_id = None  # so a failure here never marks the previous file's document as failed
@@ -73,7 +78,42 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
                 downloaded = drive.download_file(drive_service, file_id, max_bytes)
             except drive.UnsupportedDriveFile as unsupported:
                 skipped.append(str(unsupported))  # Forms, Drawings, Sites and so on have nothing to index
+
+            # Get file metadata
+            file_meta = (
+                drive_service.files()
+                .get(
+                    fileId=file_id,
+                    fields="id, name, mimeType, size, webViewLink, driveId, owners(displayName, emailAddress)",
+                )
+                .execute()
+            )
+            filename = file_meta.get("name", "Untitled")
+            mime_type = file_meta.get("mimeType", "application/octet-stream")
+            drive_owner = (file_meta.get("owners") or [None])[0] or {}
+            drive_owner_email = (drive_owner.get("emailAddress") or "").lower()
+            drive_owner_name = drive_owner.get("displayName")
+            if not drive_owner_email:
+                raise ValueError("Google Drive didn't provide this file's owner, so Amber can't index it safely.")
+
+            repository.set_drive_sync_context(conn)
+            # Google Docs, Sheets and Slides are exported to Word, Excel and PowerPoint so they parse like uploads.
+            # `title` is what the user sees; `parse_name` tells the parser which format the bytes are.
+            title = filename
+            parse_name = filename
+            file_type = filename.rsplit(".", 1)[-1].lower() if "." in filename else "unknown"
+            if mime_type in drive.GOOGLE_EXPORTS:
+                file_type, mime_type, extension = drive.GOOGLE_EXPORTS[mime_type]
+                parse_name = filename + extension
+                request_obj = drive_service.files().export_media(fileId=file_id, mimeType=mime_type)
+            elif mime_type.startswith("application/vnd.google-apps."):
+                skipped.append(filename)  # Forms, Drawings, Sites and so on have nothing to index
                 continue
+            else:
+                request_obj = drive_service.files().get_media(fileId=file_id)
+
+            file_bytes = request_obj.execute()
+
             title = downloaded["title"]
             file_type = downloaded["file_type"]
             mime_type = downloaded["mime_type"]
@@ -82,8 +122,11 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
 
             # Fetch file permissions
             grants = drive.fetch_drive_permissions(drive_service, file_id)
-            if not grants:
-                grants = [{"grant_type": "user", "grantee": user["email"].lower()}]
+            if not any(
+                grant.get("grant_type") == "user" and grant.get("grantee", "").lower() == drive_owner_email
+                for grant in grants
+            ):
+                grants.append({"grant_type": "user", "grantee": drive_owner_email})
 
             # Process upload without re-uploading to Drive (since it's already in Drive)
             # We can invoke pipeline steps directly or via process_document_upload with sync_to_drive=False
@@ -93,6 +136,9 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
             doc_row = repository.upsert_document(
                 conn,
                 owner_id=user["id"],
+                imported_by_user_id=user["id"],
+                drive_owner_email=drive_owner_email,
+                drive_owner_name=drive_owner_name,
                 origin="drive_sync",
                 drive_file_id=file_id,
                 title=title,
@@ -111,7 +157,7 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
                 [
                     {
                         "principal_type": g.get("grant_type", "user"),
-                        "principal_value": g.get("grantee", user["email"].lower()),
+                        "principal_value": (g.get("grantee") or "").lower(),
                         "origin": "drive_sync",
                     }
                     for g in grants
@@ -142,6 +188,13 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
                 conn.rollback()
             failed.append({"title": title, "error": message})
 
+    if imported:
+        try:
+            drive_sync.ensure_drive_watch(user["id"], conn, settings)
+        except drive_sync.DriveSyncError as exc:
+            sync_warning = str(exc)
+            log.warning("Could not start Drive permission sync for user %s: %s", user["id"], exc)
+
     repository.insert_audit(
         conn,
         actor_user_id=user["id"],
@@ -152,7 +205,13 @@ def import_drive_files(user: CurrentUser, conn: DbDep, req: DriveImportRequest) 
         ip=None,
     )
     conn.commit()
-    return {"success": True, "imported": imported, "skipped": skipped, "failed": failed}
+    return {
+        "success": True,
+        "imported": imported,
+        "skipped": skipped,
+        "failed": failed,
+        "drive_sync_warning": sync_warning,
+    }
 
 
 @router.post("/webhook", status_code=status.HTTP_204_NO_CONTENT)

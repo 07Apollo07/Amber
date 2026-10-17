@@ -1,7 +1,9 @@
 """Documents API router: listing, uploading, and managing indexed documents."""
 
+import logging
 import re
 import uuid
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -10,10 +12,11 @@ from pydantic import BaseModel, Field
 from amber import repository
 from amber.ingest import settings as indexing_settings
 from amber.ingest.pipeline import process_document_upload
-from amber.util import drive
-from amber.util.security import CsrfProtected, CurrentUser, DbDep
+from amber.util import drive, drive_sync
+from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
+log = logging.getLogger(__name__)
 
 EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -55,6 +58,8 @@ def _serialize(row: dict[str, Any], owner_email: str) -> dict[str, Any]:
         sharing = {"kind": "domain", "domain": domain}
     elif people:
         sharing = {"kind": "people", "emails": people}
+    collections = row.get("collections") or []
+    first_collection = collections[0] if collections else None
     return {
         "id": str(row["id"]),
         "title": row["title"],
@@ -68,11 +73,16 @@ def _serialize(row: dict[str, Any], owner_email: str) -> dict[str, Any]:
         "last_synced_at": row["last_synced_at"].isoformat() if row.get("last_synced_at") else None,
         "chunk_count": int(row.get("chunk_count") or 0),
         "owner": {"name": row.get("owner_name"), "email": row.get("owner_email")},
+        "imported_by": {"name": row.get("importer_name"), "email": row.get("importer_email")},
         "is_owner": bool(row.get("is_owner", True)),
         "drive_url": f"https://drive.google.com/file/d/{row['drive_file_id']}/view" if row["drive_file_id"] else None,
         "tags": list(row.get("tags") or []),
-        "collection": row.get("collection"),
-        "collection_id": str(row["collection_id"]) if row.get("collection_id") else None,
+        "collections": [
+            {"id": str(collection["id"]), "name": collection["name"]}
+            for collection in collections
+        ],
+        "collection": first_collection["name"] if first_collection else None,
+        "collection_id": str(first_collection["id"]) if first_collection else None,
         "sharing": sharing,
     }
 
@@ -113,41 +123,97 @@ def apply_access(conn: Any, document_id: uuid.UUID, access: tuple[str, list[dict
 
 
 @router.get("/mine")
-def list_my_documents(user: CurrentUser, conn: DbDep) -> dict[str, Any]:
-    """Everything the user owns or has been given access to, plus the collection and tag names they can pick from."""
+def list_my_documents(user: CurrentUser, conn: DbDep, settings: SettingsDep) -> dict[str, Any]:
+    """Documents the user can access through Drive, plus their collections and tags."""
     repository.set_app_user_context(conn, user["email"], user["domain"])
     rows = repository.list_accessible_documents(
         conn, user_id=user["id"], user_email=user["email"], user_domain=user["domain"]
     )
+    drive_service = drive.build_drive_service(user["id"], conn)
+    for row in rows:
+        if row.get("drive_owner_email") or not row.get("drive_file_id") or drive_service is None:
+            continue
+        try:
+            meta = (
+                drive_service.files()
+                .get(
+                    fileId=row["drive_file_id"],
+                    fields="owners(displayName, emailAddress),driveId",
+                )
+                .execute()
+            )
+            if meta.get("driveId"):
+                continue
+            owner = (meta.get("owners") or [None])[0] or {}
+            if owner.get("emailAddress"):
+                repository.update_drive_owner(
+                    conn, row["id"], owner["emailAddress"], owner.get("displayName")
+                )
+                row["drive_owner_email"] = owner["emailAddress"].lower()
+                row["drive_owner_name"] = owner.get("displayName")
+                row["owner_email"] = owner["emailAddress"].lower()
+                row["owner_name"] = owner.get("displayName")
+                row["is_owner"] = owner["emailAddress"].lower() == user["email"].lower()
+        except Exception as exc:
+            log.warning("Could not refresh Drive owner for indexed file %s: %s", row["id"], type(exc).__name__)
+    sync_warning = None
+    if any(row.get("drive_file_id") for row in rows):
+        try:
+            drive_sync.ensure_drive_watch(user["id"], conn, settings)
+        except drive_sync.DriveSyncError as exc:
+            sync_warning = str(exc)
+            log.warning("Could not ensure Drive permission sync for user %s: %s", user["id"], exc)
+    sync_state = repository.get_drive_sync_state(conn, user["id"])
+    conn.commit()
     return {
         "documents": [_serialize(r, r.get("owner_email") or user["email"]) for r in rows],
-        "collections": [{"id": str(c["id"]), "name": c["name"]} for c in repository.list_collections(conn, user["id"])],
+        "drive_sync": {
+            "active": bool(sync_state and sync_state["channel_expires"] > datetime.now(UTC)),
+            "expires_at": sync_state["channel_expires"].isoformat() if sync_state else None,
+            "warning": sync_warning,
+        },
+        "collections": [
+            {
+                "id": str(c["id"]),
+                "name": c["name"],
+                "owner": {"name": c["owner_name"], "email": c["owner_email"]},
+                "is_owner": c["is_owner"],
+                "role": c["role"],
+                "members": c["members"],
+            }
+            for c in repository.list_collections(conn, user["id"])
+        ],
         "tags": repository.list_tag_names(conn, user["id"]),
     }
 
 
 @router.get("/{document_id}/details")
 def document_details(user: CurrentUser, conn: DbDep, document_id: uuid.UUID) -> dict[str, Any]:
-    """Details that need Google Drive: who owns the file there. `drive_owner` is null when Drive can't say."""
-    doc = _require_owned(conn, user, document_id)
-    drive_owner = None
-    if doc["drive_file_id"]:
-        drive_service = drive.build_drive_service(user["id"], conn)
-        if drive_service is not None:
-            try:
-                meta = drive_service.files().get(fileId=doc["drive_file_id"], fields="owners(displayName, emailAddress)").execute()
-                owner = (meta.get("owners") or [None])[0]
-                if owner:
-                    drive_owner = {"name": owner.get("displayName"), "email": owner.get("emailAddress")}
-            except Exception:
-                drive_owner = None  # deleted, no access, or Drive is unavailable: the page falls back to the Amber owner
-    return {"drive_owner": drive_owner}
+    """Returns the cached Google Drive owner for a file the caller can access."""
+    doc = _require_accessible(conn, user, document_id)
+    return {
+        "drive_owner": {"name": doc.get("drive_owner_name"), "email": doc.get("drive_owner_email")}
+        if doc.get("drive_owner_email")
+        else None
+    }
 
 
 def _require_owned(conn: Any, user: dict[str, Any], document_id: uuid.UUID) -> dict[str, Any]:
+    doc = _require_accessible(conn, user, document_id)
+    is_owner = (
+        doc.get("owner_id") == user["id"]
+        if not doc.get("drive_file_id")
+        else (doc.get("drive_owner_email") or "").lower() == user["email"].lower()
+    )
+    if not is_owner:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return doc
+
+
+def _require_accessible(conn: Any, user: dict[str, Any], document_id: uuid.UUID) -> dict[str, Any]:
     repository.set_app_user_context(conn, user["email"], user["domain"])
     doc = repository.get_document(conn, document_id)
-    if not doc or doc["owner_id"] != user["id"]:
+    if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
 

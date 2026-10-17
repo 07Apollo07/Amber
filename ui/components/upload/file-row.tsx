@@ -6,9 +6,15 @@ import { Building2, ChevronRight, ExternalLink, Lock, Settings2, UsersRound, X }
 import { StatusBadge } from "@/components/app/status-badge"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Progress } from "@/components/ui/progress"
 import { formatBytes } from "@/lib/format"
-import type { Sharing, UploadRow } from "@/lib/types"
+import type { Collection, Sharing, UploadRow } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
 export function sharingLabel(sharing: Sharing) {
@@ -30,28 +36,23 @@ function personLabel(p: Person) {
 /** One document in Manage Files. Saved documents expand to show owner, sharing, last update and indexing details. */
 export function FileRow({
   row,
+  collections,
   onRemove,
   onManage,
+  onToggleCollection,
 }: {
   row: UploadRow
+  collections: Collection[]
   onRemove: (id: string) => void
   onManage: (row: UploadRow) => void
+  onToggleCollection: (row: UploadRow, collectionId: string, included: boolean) => void
 }) {
   const [open, setOpen] = useState(false)
-  // The file's owner in Google Drive, looked up the first time the details are opened.
-  const [driveOwner, setDriveOwner] = useState<Person | null | undefined>(undefined)
   const inProgress = row.status !== "ready" && row.status !== "failed"
   const { icon: ShareIcon, text } = sharingLabel(row.sharing)
 
   function toggle(next: boolean) {
     setOpen(next)
-    if (next && driveOwner === undefined && row.driveUrl && row.isOwner) {
-      setDriveOwner(null) // marks the lookup as started
-      fetch(`/api/documents/${row.id}/details`, { credentials: "same-origin" })
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data: { drive_owner: Person | null } | null) => setDriveOwner(data?.drive_owner ?? null))
-        .catch(() => setDriveOwner(null))
-    }
   }
 
   const header = (
@@ -98,6 +99,26 @@ export function FileRow({
             </a>
           </Button>
         )}
+        {row.saved && collections.length > 0 && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" aria-label={`Choose collections for ${row.name}`}>
+                Collections{row.collections.length > 0 ? ` · ${row.collections.length}` : ""}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {collections.map((collection) => (
+                <DropdownMenuCheckboxItem
+                  key={collection.id}
+                  checked={row.collections.some((item) => item.id === collection.id)}
+                  onCheckedChange={(included) => onToggleCollection(row, collection.id, included)}
+                >
+                  {collection.name}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         {row.saved && row.isOwner && (
           <Button variant="outline" size="sm" onClick={() => onManage(row)}>
             <Settings2 /> Manage
@@ -114,7 +135,6 @@ export function FileRow({
 
   if (!row.saved) return <li>{header}</li>
 
-  const owner: Person = driveOwner ?? row.owner
   const people = row.sharing.kind === "people" ? row.sharing.emails : []
   const updated = new Date(row.updatedAt)
 
@@ -136,9 +156,8 @@ export function FileRow({
                 "Only the owner (0 people)"
               )}
             </Detail>
-            <Detail label={driveOwner ? "Owner in Google Drive" : "Owner"}>
-              {personLabel(owner)}
-            </Detail>
+            <Detail label="Owner in Google Drive">{personLabel(row.owner)}</Detail>
+            <Detail label="Added to Amber by">{personLabel(row.importedBy)}</Detail>
             <Detail label="Last updated">
               {Number.isNaN(updated.getTime())
                 ? "Unknown"

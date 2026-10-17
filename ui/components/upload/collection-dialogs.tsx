@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { apiDelete, apiPost, apiPut } from "@/lib/api"
-import type { Collection, Sharing, UploadRow } from "@/lib/types"
+import type { Collection, Sharing } from "@/lib/types"
 
 import { SharingSelector } from "./sharing-selector"
 
@@ -90,30 +90,29 @@ export function CollectionNameDialog({
   )
 }
 
-/** Sets who can access every document in the collection at once. */
+/** Adds/removes collection collaborators and propagates their access to the collection's Drive files. */
 export function CollectionShareDialog({
   collection,
-  rows,
   domain,
   onClose,
   onDone,
 }: {
   collection: Collection
-  rows: UploadRow[]
   domain: string | null
   onClose: () => void
   onDone: () => void
 }) {
-  // Start from the current sharing when every document agrees, otherwise from private.
   const [sharing, setSharing] = useState<Sharing>(() => {
-    const first = rows[0]?.sharing
-    return first && rows.every((r) => JSON.stringify(r.sharing) === JSON.stringify(first)) ? first : { kind: "private" }
+    const members = collection.members ?? []
+    const domainMember = members.find((member) => member.type === "domain")
+    if (domainMember) return { kind: "domain", domain: domainMember.value }
+    const emails = members.filter((member) => member.type === "user").map((member) => member.value)
+    return emails.length ? { kind: "people", emails } : { kind: "private" }
   })
   const { busy, run } = useAction(() => {
     onDone()
     onClose()
   })
-  const mixed = rows.length > 1 && new Set(rows.map((r) => JSON.stringify(r.sharing))).size > 1
 
   return (
     <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
@@ -121,8 +120,8 @@ export function CollectionShareDialog({
         <DialogHeader>
           <DialogTitle className="truncate">Share “{collection.name}”</DialogTitle>
           <DialogDescription>
-            This sets access for all {rows.length} {rows.length === 1 ? "document" : "documents"} in the collection
-            {mixed ? ", replacing the different access they have now" : ""}. Files you add later aren&apos;t included.
+            People you add get view access to every current file and to files added later. Amber changes only the
+            collection&apos;s Drive grants; direct permissions managed elsewhere are left alone.
           </DialogDescription>
         </DialogHeader>
         <SharingSelector value={sharing} onChange={setSharing} domain={domain} />
@@ -131,15 +130,17 @@ export function CollectionShareDialog({
             Cancel
           </Button>
           <Button
-            disabled={busy || rows.length === 0}
+            disabled={busy}
             onClick={() =>
               run(async () => {
                 const res = await apiPut(`/api/collections/${collection.id}/access`, {
                   kind: sharing.kind,
                   emails: sharing.kind === "people" ? sharing.emails : [],
+                  domain: sharing.kind === "domain" ? sharing.domain : null,
                 })
-                const { updated, failed } = (await res.json()) as {
-                  updated: number
+                const { added, removed, failed } = (await res.json()) as {
+                  added: number
+                  removed: number
                   failed: { title: string; error: string }[]
                 }
                 if (failed.length > 0) {
@@ -148,11 +149,12 @@ export function CollectionShareDialog({
                     duration: 12000,
                   })
                 }
-                if (updated > 0) return `Updated access for ${updated} ${updated === 1 ? "document" : "documents"}`
+                if (failed.length === 0) return "Collection access updated"
+                if (added + removed > 0) return undefined
               })
             }
           >
-            {busy && <Loader2 className="animate-spin" />} Apply to all
+            {busy && <Loader2 className="animate-spin" />} Update access
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -195,7 +197,19 @@ export function CollectionDeleteDialog({
             disabled={busy}
             onClick={() =>
               run(async () => {
-                await apiDelete(`/api/collections/${collection.id}`)
+                const response = await apiDelete(`/api/collections/${collection.id}`)
+                const result = (await response.json()) as {
+                  failed: { title: string; member: string; error: string }[]
+                }
+                if (result.failed.length > 0) {
+                  toast.error("Collection deleted, but some Drive access couldn't be removed", {
+                    description: result.failed
+                      .map((item) => `${item.title} (${item.member}): ${item.error}`)
+                      .join("\n"),
+                    duration: 12000,
+                  })
+                  return undefined
+                }
                 return "Collection deleted"
               })
             }

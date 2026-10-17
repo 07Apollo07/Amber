@@ -13,7 +13,6 @@ from amber.models import DRIVE_SCOPE
 from amber.util.config import get_settings
 from amber.util.crypto import decrypt_token
 
-
 # Google-native files have no bytes of their own, so they're exported to an Office format that our
 # parsers read. Value: (file_type stored in Amber, export mime type, extension used for parsing).
 GOOGLE_EXPORTS: dict[str, tuple[str, str, str]] = {
@@ -173,34 +172,128 @@ def download_file(drive_service: Any, file_id: str, max_bytes: int) -> dict[str,
 
 
 def fetch_drive_permissions(drive_service: Any, file_id: str) -> list[dict[str, Any]]:
-    """Fetches all direct user/domain grants; Google API errors propagate to prevent false revocations."""
-    grants = []
+    """Fetches all pages of Drive permissions and maps supported principals to Amber grants."""
+    raw_perms = []
     page_token = None
     while True:
-        response = (
-            drive_service.permissions()
-            .list(
-                fileId=file_id,
-                pageToken=page_token,
-                pageSize=100,
-                fields="nextPageToken,permissions(id, role, type, emailAddress, domain, deleted)",
+        try:
+            response = (
+                drive_service.permissions()
+                .list(
+                    fileId=file_id,
+                    pageSize=100,
+                    pageToken=page_token,
+                    fields="nextPageToken,permissions(id, role, type, emailAddress, domain)",
+                )
+                .execute()
             )
-            .execute()
-        )
-        for permission in response.get("permissions", []):
-            if permission.get("deleted") or permission.get("role") not in ("reader", "commenter", "writer", "owner"):
-                continue
-
-            if permission.get("type") == "user" and permission.get("emailAddress"):
-                grants.append({"grant_type": "user", "grantee": permission["emailAddress"].lower()})
-            elif permission.get("type") == "domain" and permission.get("domain"):
-                grants.append({"grant_type": "domain", "grantee": permission["domain"].lower()})
-
+        except Exception as exc:
+            raise DriveSharingError(_drive_error_message(exc, "")) from exc
+        raw_perms.extend(response.get("permissions", []))
         page_token = response.get("nextPageToken")
         if not page_token:
             break
 
+    grants = []
+    for p in raw_perms:
+        ptype = p.get("type")
+        role = p.get("role")
+        if role not in ("reader", "commenter", "writer", "owner"):
+            continue
+
+        if ptype == "user":
+            email = p.get("emailAddress")
+            if email:
+                grants.append({"grant_type": "user", "grantee": email.lower()})
+        elif ptype == "domain":
+            domain = p.get("domain")
+            if domain:
+                grants.append({"grant_type": "domain", "grantee": domain.lower()})
+        elif ptype == "anyone":
+            grants.append({"grant_type": "public", "grantee": None})
+        # Group entries are not yet resolvable to individual Amber users.
+
     return grants
+
+
+def sharing_option_for_grants(grants: list[dict[str, Any]], owner_email: str | None) -> str | None:
+    if any(grant.get("grant_type") == "domain" for grant in grants):
+        return "domain"
+    if not owner_email:
+        return None
+    owner = owner_email.lower()
+    has_other_user = any(
+        grant.get("grant_type") == "user" and (grant.get("grantee") or "").lower() != owner
+        for grant in grants
+    )
+    return "specific_people" if has_other_user else "private"
+
+
+def ensure_drive_permission(
+    drive_service: Any, file_id: str, principal_type: str, principal_value: str, role: str = "reader"
+) -> str | None:
+    """Adds a direct My Drive grant if no matching permission already exists.
+
+    Returns the permission ID only when Amber created the grant, so later collection changes
+    can remove only permissions owned by this collection workflow.
+    """
+    page_token = None
+    while True:
+        try:
+            response = (
+                drive_service.permissions()
+                .list(
+                    fileId=file_id,
+                    pageToken=page_token,
+                    pageSize=100,
+                    fields="nextPageToken,permissions(id, role, type, emailAddress, domain)",
+                )
+                .execute()
+            )
+        except Exception as exc:
+            raise DriveSharingError(_drive_error_message(exc, "")) from exc
+        for permission in response.get("permissions", []):
+            if permission.get("type") != principal_type:
+                continue
+            value = (
+                (permission.get("emailAddress") or "").lower()
+                if principal_type == "user"
+                else (permission.get("domain") or "").lower()
+            )
+            if value == principal_value.lower() and permission.get("role") in ("reader", "commenter", "writer", "owner"):
+                return None
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+
+    body = {"type": principal_type, "role": role}
+    body["emailAddress" if principal_type == "user" else "domain"] = principal_value
+    try:
+        result = (
+            drive_service.permissions()
+            .create(
+                fileId=file_id,
+                body=body,
+                fields="id",
+                **({"sendNotificationEmail": False} if principal_type == "user" else {}),
+            )
+            .execute()
+        )
+    except Exception as exc:
+        raise DriveSharingError(_drive_error_message(exc, f" to {principal_value}")) from exc
+    permission_id = result.get("id")
+    if not permission_id:
+        raise DriveSharingError(f"Google Drive did not return a permission ID for {principal_value}.")
+    return permission_id
+
+
+def remove_drive_permission(drive_service: Any, file_id: str, permission_id: str) -> None:
+    try:
+        drive_service.permissions().delete(fileId=file_id, permissionId=permission_id).execute()
+    except Exception as exc:
+        if getattr(getattr(exc, "resp", None), "status", None) == 404:
+            return
+        raise DriveSharingError(_drive_error_message(exc, "")) from exc
 
 
 class DriveSharingError(Exception):
@@ -211,7 +304,7 @@ def _drive_error_message(exc: Exception, subject: str) -> str:
     status = getattr(getattr(exc, "resp", None), "status", None)
     detail = str(exc)
     if status == 403 and "insufficient" in detail.lower():
-        return "Amber doesn't have permission to change sharing in Google Drive yet. Sign in again and allow full Drive access."
+        return "Amber doesn't have permission to change sharing in Google Drive. Reconnect your Google Drive account and try again."
     if status in (403, 404):
         return f"You can't change sharing for this file in Google Drive{subject}. Only people with edit access to it can."
     if status == 400 and "no google account" in detail.lower():

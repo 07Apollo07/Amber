@@ -53,6 +53,7 @@ class AgentState(MessagesState):
     user_id: str
     user_email: str
     user_domain: str | None
+    collection_id: str | None
     tasks: list[dict]
     visuals: Annotated[dict[str, dict], operator.or_]
 

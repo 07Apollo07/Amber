@@ -5,8 +5,8 @@ import uuid
 from typing import Any
 
 from amber import repository
-from amber.ingest.chunker import chunk_document_blocks
 from amber.ingest import settings as indexing_settings
+from amber.ingest.chunker import chunk_document_blocks
 from amber.ingest.embedder import generate_embeddings
 from amber.ingest.parser import parse_document
 from amber.util import db, drive
@@ -95,11 +95,15 @@ def process_document_upload(
                     raise RuntimeError(f"Failed to save file to Google Drive: {exc}") from exc
 
         origin = "drive_sync" if drive_file_id else "desktop_upload"
+        user_row = repository.get_user(conn, user_id)
 
         # 1. Upsert document record
         doc_row = repository.upsert_document(
             conn,
             owner_id=user_id,
+            imported_by_user_id=user_id,
+            drive_owner_email=user_row["email"] if drive_file_id and user_row else None,
+            drive_owner_name=user_row["name"] if drive_file_id and user_row else None,
             origin=origin,
             drive_file_id=drive_file_id,
             title=filename,
@@ -123,9 +127,8 @@ def process_document_upload(
             if g.get("grantee") is not None or g.get("grant_type") == "domain"
         ]
         if not formatted_grants:
-            # Fallback to user email if available
-            user_row = repository.get_user(conn, user_id)
-            if user_row:
+            # Files without a Drive source retain the uploader's access.
+            if user_row and not drive_file_id:
                 formatted_grants = [{"principal_type": "user", "principal_value": user_row["email"].lower(), "origin": "manual"}]
 
         repository.set_document_access(conn, doc_id, formatted_grants)

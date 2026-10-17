@@ -1,6 +1,8 @@
 """Tests for the agent chat and conversation history endpoints."""
 
 import asyncio
+import uuid
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +11,7 @@ from langchain_core.messages import AIMessage
 from pydantic import SecretStr
 
 from amber.agent import graph as agent_graph
+from amber.agent import tools as agent_tools
 from amber.api import agent as agent_api
 
 
@@ -75,6 +78,31 @@ def test_agent_graph_uses_model_from_run_config(monkeypatch: pytest.MonkeyPatch)
     )
 
     assert invoked_models == ["chosen-model"]
+
+
+def test_vector_search_passes_selected_collection_to_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:
+    collection_id = uuid.uuid4()
+    search_args: dict = {}
+    monkeypatch.setattr(agent_tools, "_emit_task", lambda *_args: None)
+    monkeypatch.setattr(agent_tools, "get_settings", lambda: object())
+    monkeypatch.setattr(agent_tools, "generate_embeddings", lambda _texts: [[0.1]])
+    monkeypatch.setattr(agent_tools, "connect", lambda _settings: nullcontext(object()))
+
+    def fake_search(_conn, **kwargs):
+        search_args.update(kwargs)
+        return []
+
+    monkeypatch.setattr(agent_tools.repository, "hybrid_search_chunks", fake_search)
+
+    result = agent_tools.vector_search.func(
+        "find this",
+        "user@example.com",
+        None,
+        str(collection_id),
+    )
+
+    assert result == "No relevant internal documents found."
+    assert search_args["collection_ids"] == [collection_id]
 
 
 def test_agent_chat_unauthenticated(client: TestClient) -> None:

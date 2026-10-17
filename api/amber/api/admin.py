@@ -141,6 +141,7 @@ def list_documents(admin: AdminUser, conn: DbDep) -> dict[str, Any]:
                 "file_size_bytes": r["file_size_bytes"] or 0,
                 "chunk_count": int(r["chunk_count"]),
                 "owner": {"name": r["owner_name"], "email": r["owner_email"]},
+                "imported_by": {"name": r["importer_name"], "email": r["importer_email"]},
                 "drive_url": f"https://drive.google.com/file/d/{r['drive_file_id']}/view" if r["drive_file_id"] else None,
                 "tags": list(r["tags"] or []),
                 "access": r["access"] or [],

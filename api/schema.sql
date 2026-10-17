@@ -63,7 +63,11 @@ CREATE INDEX IF NOT EXISTS ix_revoked_sessions_expires_at ON revoked_sessions (e
 
 CREATE TABLE IF NOT EXISTS documents (
     id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- owner_id is retained as the Amber record creator for compatibility. Drive ownership is stored separately.
     owner_id         uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    imported_by_user_id uuid REFERENCES users (id) ON DELETE SET NULL,
+    drive_owner_email varchar(320),
+    drive_owner_name  varchar(255),
     origin           varchar(32) NOT NULL,
     drive_file_id    varchar(255),
     title            varchar(512) NOT NULL,
@@ -158,6 +162,31 @@ CREATE TABLE IF NOT EXISTS collection_documents (
 );
 CREATE INDEX IF NOT EXISTS ix_collection_documents_doc ON collection_documents (document_id);
 
+CREATE TABLE IF NOT EXISTS collection_members (
+    collection_id  uuid NOT NULL REFERENCES collections (id) ON DELETE CASCADE,
+    principal_type varchar(16) NOT NULL,
+    principal_value varchar(320) NOT NULL,
+    drive_role     varchar(16) NOT NULL DEFAULT 'reader',
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (collection_id, principal_type, principal_value),
+    CONSTRAINT ck_collection_members_principal_type CHECK (principal_type IN ('user', 'domain')),
+    CONSTRAINT ck_collection_members_drive_role CHECK (drive_role IN ('reader', 'writer'))
+);
+CREATE INDEX IF NOT EXISTS ix_collection_members_principal
+    ON collection_members (principal_type, principal_value);
+
+-- Only permissions created by Amber for collection membership are recorded here.
+-- Direct Drive grants and grants managed outside Amber are never removed by collection changes.
+CREATE TABLE IF NOT EXISTS collection_drive_grants (
+    document_id    uuid NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
+    principal_type varchar(16) NOT NULL,
+    principal_value varchar(320) NOT NULL,
+    permission_id  varchar(255) NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (document_id, principal_type, principal_value),
+    CONSTRAINT ck_collection_drive_grants_principal_type CHECK (principal_type IN ('user', 'domain'))
+);
+
 CREATE TABLE IF NOT EXISTS tags (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name        varchar(64) NOT NULL UNIQUE,
@@ -170,6 +199,60 @@ CREATE TABLE IF NOT EXISTS document_tags (
     created_at   timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (document_id, tag_id)
 );
+
+-- A Drive file is one indexed source, even if multiple Amber users previously imported it.
+DO $$
+DECLARE
+    duplicate_group record;
+    keeper_id uuid;
+BEGIN
+    FOR duplicate_group IN
+        SELECT drive_file_id,
+               (array_agg(id ORDER BY (status = 'indexed') DESC, updated_at DESC, id))[1] AS keeper_id
+          FROM documents
+         WHERE drive_file_id IS NOT NULL
+         GROUP BY drive_file_id
+        HAVING count(*) > 1
+    LOOP
+        keeper_id := duplicate_group.keeper_id;
+
+        INSERT INTO collection_documents (collection_id, document_id)
+        SELECT collection_id, keeper_id
+          FROM collection_documents
+         WHERE document_id IN (SELECT id FROM documents WHERE drive_file_id = duplicate_group.drive_file_id)
+        ON CONFLICT DO NOTHING;
+        INSERT INTO document_tags (document_id, tag_id)
+        SELECT keeper_id, tag_id
+          FROM document_tags
+         WHERE document_id IN (SELECT id FROM documents WHERE drive_file_id = duplicate_group.drive_file_id)
+        ON CONFLICT DO NOTHING;
+        INSERT INTO document_access (document_id, principal_type, principal_value, origin)
+        SELECT keeper_id, principal_type, principal_value, origin
+          FROM document_access
+         WHERE document_id IN (SELECT id FROM documents WHERE drive_file_id = duplicate_group.drive_file_id)
+        ON CONFLICT (document_id, principal_type, principal_value) DO NOTHING;
+
+        DELETE FROM chunks
+         WHERE document_id IN (
+             SELECT id FROM documents
+              WHERE drive_file_id = duplicate_group.drive_file_id AND id <> keeper_id
+         );
+        DELETE FROM collection_documents
+         WHERE document_id IN (
+             SELECT id FROM documents
+              WHERE drive_file_id = duplicate_group.drive_file_id AND id <> keeper_id
+         );
+        DELETE FROM document_tags
+         WHERE document_id IN (
+             SELECT id FROM documents
+              WHERE drive_file_id = duplicate_group.drive_file_id AND id <> keeper_id
+         );
+        DELETE FROM documents
+         WHERE drive_file_id = duplicate_group.drive_file_id AND id <> keeper_id;
+    END LOOP;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_documents_drive_file_id
+    ON documents (drive_file_id) WHERE drive_file_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS query_traces (
     id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -229,12 +312,17 @@ CREATE TABLE IF NOT EXISTS settings (
 ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_access ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS document_access_internal_policy ON document_access;
+CREATE POLICY document_access_internal_policy ON document_access
+  FOR ALL
+  USING (true)
+  WITH CHECK (true);
 
 DROP POLICY IF EXISTS documents_access_policy ON documents;
 CREATE POLICY documents_access_policy ON documents
   FOR ALL
   USING (
-    owner_id IN (SELECT id FROM users WHERE email = NULLIF(current_setting('app.user_email', true), ''))
+    current_setting('app.drive_sync', true) = 'true'
     OR EXISTS (
       SELECT 1 FROM document_access da
       WHERE da.document_id = documents.id
@@ -243,7 +331,8 @@ CREATE POLICY documents_access_policy ON documents
           OR (da.principal_type = 'domain' AND da.principal_value = NULLIF(current_setting('app.user_domain', true), ''))
         )
     )
-  );
+  )
+  WITH CHECK (true);
 
 DROP POLICY IF EXISTS chunks_access_policy ON chunks;
 CREATE POLICY chunks_access_policy ON chunks
@@ -261,6 +350,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'amber_app') THEN
     GRANT SELECT, INSERT, UPDATE ON users TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON oauth_tokens TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON drive_sync_state TO amber_app;
     GRANT INSERT ON audit_log TO amber_app;  -- append-only: no SELECT, UPDATE or DELETE
     GRANT SELECT, INSERT, DELETE ON revoked_sessions TO amber_app;
 
@@ -271,6 +361,8 @@ BEGIN
     GRANT SELECT, INSERT, UPDATE, DELETE ON chunks TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON collections TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON collection_documents TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON collection_members TO amber_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON collection_drive_grants TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON tags TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON document_tags TO amber_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON conversations TO amber_app;
@@ -289,5 +381,11 @@ BEGIN
     GRANT DELETE ON users TO amber_app;
   END IF;
 END $$;
+
+-- Drive source ownership is distinct from the Amber user who first indexed the file.
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS imported_by_user_id uuid REFERENCES users (id) ON DELETE SET NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS drive_owner_email varchar(320);
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS drive_owner_name varchar(255);
+UPDATE documents SET imported_by_user_id = owner_id WHERE imported_by_user_id IS NULL;
 
 COMMIT;

@@ -16,6 +16,7 @@ export function OrganizeFields({
   collections = [],
   knownTags = [],
   idPrefix = "",
+  showCollection = true,
 }: {
   collection: string
   onCollectionChange: (value: string) => void
@@ -27,6 +28,7 @@ export function OrganizeFields({
   knownTags?: string[]
   /** Keeps element ids unique when this form is on the page more than once. */
   idPrefix?: string
+  showCollection?: boolean
 }) {
   const [addedTags, setAddedTags] = useState<string[]>([])
   const tagOptions = [...new Set([...knownTags, ...addedTags, ...tags])]
@@ -55,7 +57,7 @@ export function OrganizeFields({
 
   return (
     <div className="space-y-4">
-      <div className="space-y-1.5">
+      {showCollection && <div className="space-y-1.5">
         <Label htmlFor={`${idPrefix}collection`}>Collection</Label>
         <Select value={collection} onValueChange={onCollectionChange}>
           <SelectTrigger id={`${idPrefix}collection`} className="w-full">
@@ -83,7 +85,7 @@ export function OrganizeFields({
           placeholder="Or create a new collection"
           aria-label="New collection name"
         />
-      </div>
+      </div>}
       <div className="space-y-1.5">
         <Label htmlFor={`${idPrefix}new-tag`}>Tags</Label>
         <div className="flex flex-wrap gap-1.5">

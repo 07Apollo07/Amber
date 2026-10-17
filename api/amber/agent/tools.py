@@ -424,6 +424,7 @@ def vector_search(
     query: str,
     user_email: Annotated[str, InjectedState("user_email")],
     user_domain: Annotated[str | None, InjectedState("user_domain")],
+    collection_id: Annotated[str | None, InjectedState("collection_id")],
 ) -> str:
     """Search internal documents using hybrid vector cosine distance and full-text search."""
     _emit_task("find-files", "Find relevant files", "in_progress")
@@ -441,6 +442,7 @@ def vector_search(
             query_embedding=embeddings[0],
             query_text=query,
             limit=5,
+            collection_ids=[uuid.UUID(collection_id)] if collection_id else None,
         )
 
     if not results:
@@ -511,8 +513,6 @@ def drive_search_files(
                 orderBy="modifiedTime desc",
                 fields="nextPageToken,files(id,name,mimeType,webViewLink,modifiedTime,size,parents,owners(displayName,emailAddress),capabilities(canEdit,canShare,canDownload))",
                 spaces="drive",
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
             )
             .execute()
         )
@@ -557,7 +557,7 @@ def drive_get_file(
                 parse_name = filename + drive.GOOGLE_EXPORTS[mime_type][2]
                 parse_mime = export_mime
             else:
-                data = service.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
+                data = service.files().get_media(fileId=file_id).execute()
                 parse_name = filename
                 parse_mime = mime_type
             if len(data) > max_bytes:
@@ -690,7 +690,6 @@ def drive_create_folder(
         created = service.files().create(
             body=body,
             fields="id,name,mimeType,webViewLink,parents",
-            supportsAllDrives=True,
         ).execute()
     except Exception:
         log.exception("Failed to create approved Drive folder %s", name)
@@ -744,7 +743,6 @@ def drive_upload_text_file(
             body=body,
             media_body=media,
             fields="id,name,mimeType,webViewLink,size,parents",
-            supportsAllDrives=True,
         ).execute()
     except Exception:
         log.exception("Failed to upload approved text file %s", title)
@@ -814,7 +812,6 @@ def drive_upload_file(
             body=body,
             media_body=media,
             fields="id,name,mimeType,webViewLink,size,parents",
-            supportsAllDrives=True,
         ).execute()
     except Exception:
         log.exception("Failed to upload approved Drive file %s", title)
@@ -921,7 +918,6 @@ def drive_manage_file(
                 fileId=file_id,
                 body={"name": new_name[:255]},
                 fields="id,name,mimeType,webViewLink,parents",
-                supportsAllDrives=True,
             ).execute()
         elif action == "move":
             old_parents = ",".join(metadata.get("parents", []))
@@ -942,7 +938,6 @@ def drive_manage_file(
                 addParents=destination_folder_id,
                 removeParents=old_parents or None,
                 fields="id,name,mimeType,webViewLink,parents",
-                supportsAllDrives=True,
             ).execute()
         elif action == "copy":
             body = {"name": new_name[:255]}
@@ -961,7 +956,6 @@ def drive_manage_file(
                 fileId=file_id,
                 body=body,
                 fields="id,name,mimeType,webViewLink,parents",
-                supportsAllDrives=True,
             ).execute()
         elif action == "update_metadata":
             body = {}
@@ -973,17 +967,15 @@ def drive_manage_file(
                 fileId=file_id,
                 body=body,
                 fields="id,name,mimeType,webViewLink,description,starred",
-                supportsAllDrives=True,
             ).execute()
         elif action in {"trash", "restore"}:
             result = service.files().update(
                 fileId=file_id,
                 body={"trashed": action == "trash"},
                 fields="id,name,mimeType,webViewLink,trashed",
-                supportsAllDrives=True,
             ).execute()
         else:
-            service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+            service.files().delete(fileId=file_id).execute()
             result = {"id": file_id, "deleted": True}
     except Exception:
         log.exception("Failed to apply approved Drive %s for %s", action, file_id)
@@ -1024,7 +1016,6 @@ def _list_drive_permissions(service: object, file_id: str) -> list[dict]:
             ),
             pageSize=100,
             pageToken=page_token,
-            supportsAllDrives=True,
         ).execute()
         permissions.extend(result.get("permissions", []))
         page_token = result.get("nextPageToken")
@@ -1117,7 +1108,6 @@ def drive_set_permission(
                 body=body,
                 sendNotificationEmail=principal_type in {"user", "group"},
                 fields="id,type,role,emailAddress,domain",
-                supportsAllDrives=True,
             ).execute()
         elif action == "update":
             result = service.permissions().update(
@@ -1125,11 +1115,10 @@ def drive_set_permission(
                 permissionId=permission_id,
                 body={"role": role},
                 fields="id,type,role,emailAddress,domain",
-                supportsAllDrives=True,
             ).execute()
         else:
             service.permissions().delete(
-                fileId=file_id, permissionId=permission_id, supportsAllDrives=True
+                fileId=file_id, permissionId=permission_id
             ).execute()
             result = {"permission_id": permission_id, "removed": True}
     except Exception:
@@ -1298,6 +1287,7 @@ def get_file(
     document_id: str,
     user_email: Annotated[str, InjectedState("user_email")],
     user_domain: Annotated[str | None, InjectedState("user_domain")],
+    user_id: Annotated[str, InjectedState("user_id")],
 ) -> str:
     """Retrieve the full indexed source file after vector_search identifies its document ID."""
     _emit_task("read-source", "Read the full source file", "in_progress")
@@ -1315,10 +1305,10 @@ def get_file(
             _emit_task("read-source", "Read the full source file", "failed")
             return "That file is not available in your Amber workspace."
 
-        service = drive.build_drive_service(document["owner_id"], conn)
+        service = drive.build_drive_service(user_id, conn)
         if service is None:
             _emit_task("read-source", "Read the full source file", "failed")
-            return "The file owner needs to reconnect Google Drive before Amber can read the source."
+            return "Reconnect Google Drive to read the full source file."
         metadata = (
             service.files()
             .get(fileId=document["drive_file_id"], fields="id,name,mimeType,size")
@@ -1713,7 +1703,6 @@ def _require_file(
     metadata = drive_service.files().get(
         fileId=file_id,
         fields=fields,
-        supportsAllDrives=True,
     ).execute()
     if expected_mime and metadata.get("mimeType") != expected_mime:
         raise ValueError("This operation only supports the matching Google Workspace file type.")
@@ -1769,7 +1758,6 @@ def create_google_doc(
         metadata = drive_service.files().get(
             fileId=document_id,
             fields="id,name,mimeType,webViewLink",
-            supportsAllDrives=True,
         ).execute()
     except Exception:
         log.exception("Failed to create approved Google Doc %s", document_id)
@@ -1932,7 +1920,6 @@ def create_google_sheet(
         metadata = drive_service.files().get(
             fileId=spreadsheet_id,
             fields="id,name,mimeType,webViewLink",
-            supportsAllDrives=True,
         ).execute()
     except Exception:
         log.exception("Failed to create approved Google Sheet %s", spreadsheet_id)

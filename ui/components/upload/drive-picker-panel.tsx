@@ -31,7 +31,7 @@ type PickerApi = {
   PickerBuilder: new () => PickerBuilder
   DocsView: new (viewId?: string) => DocsView
   ViewId: { DOCS: string }
-  Feature: { MULTISELECT_ENABLED: string; SUPPORT_DRIVES: string }
+  Feature: { MULTISELECT_ENABLED: string }
   Action: { PICKED: string }
 }
 declare global {
@@ -93,6 +93,7 @@ export function DrivePickerPanel({ onImported }: { onImported: () => void }) {
         imported: unknown[]
         skipped?: string[]
         failed?: { title: string; error: string }[]
+        drive_sync_warning?: string | null
       }
       if (data.imported.length > 0) {
         toast.success(`Imported ${data.imported.length} ${data.imported.length === 1 ? "file" : "files"}`)
@@ -105,6 +106,12 @@ export function DrivePickerPanel({ onImported }: { onImported: () => void }) {
       if (data.skipped?.length) {
         toast.warning(`Skipped ${data.skipped.length} unsupported ${data.skipped.length === 1 ? "file" : "files"}`, {
           description: data.skipped.join(", "),
+        })
+      }
+      if (data.drive_sync_warning) {
+        toast.warning("Drive permission sync couldn't be started", {
+          description: data.drive_sync_warning,
+          duration: 12000,
         })
       }
     } catch (err) {
@@ -130,7 +137,6 @@ export function DrivePickerPanel({ onImported }: { onImported: () => void }) {
         .setTitle("Choose files for Amber")
         .addView(myDrive)
         .enableFeature(picker.Feature.MULTISELECT_ENABLED)
-        .enableFeature(picker.Feature.SUPPORT_DRIVES)
         .setOAuthToken(token.access_token)
         .setDeveloperKey(token.developer_key)
         .setAppId(token.app_id)

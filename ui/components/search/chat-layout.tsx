@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { Check, ChevronDown, Cpu, MessageSquare, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react"
+import { Check, ChevronDown, Cpu, FolderOpen, MessageSquare, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react"
 
 import { AmberMark } from "@/components/app/amber-logo"
 import {
@@ -63,6 +63,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { apiDelete, apiPost, apiPut } from "@/lib/api"
 import { demoAction } from "@/lib/demo"
 import type { Conversation as ConversationRecord } from "@/lib/types"
@@ -104,6 +105,7 @@ type AgentModelsResponse = {
   default_model: string
   models: string[]
 }
+type AgentCollection = { id: string; name: string }
 
 function isAgentModelsResponse(value: unknown): value is AgentModelsResponse {
   return (
@@ -112,6 +114,17 @@ function isAgentModelsResponse(value: unknown): value is AgentModelsResponse {
     typeof value.default_model === "string" &&
     Array.isArray(value.models) &&
     value.models.every((model) => typeof model === "string")
+  )
+}
+
+function isAgentCollectionsResponse(value: unknown): value is { collections: AgentCollection[] } {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.collections) &&
+    value.collections.every(
+      (collection) =>
+        isRecord(collection) && typeof collection.id === "string" && typeof collection.name === "string",
+    )
   )
 }
 
@@ -366,6 +379,9 @@ export function ChatLayout() {
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [modelPickerOpen, setModelPickerOpen] = useState(false)
   const [modelLoadError, setModelLoadError] = useState(false)
+  const [collections, setCollections] = useState<AgentCollection[]>([])
+  const [selectedCollectionId, setSelectedCollectionId] = useState<string | null>(null)
+  const [collectionLoadError, setCollectionLoadError] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState("")
   const [savingConversationId, setSavingConversationId] = useState<string | null>(null)
@@ -407,6 +423,30 @@ export function ChatLayout() {
     }
 
     void fetchModels()
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    async function fetchCollections() {
+      try {
+        const response = await fetch("/api/collections", {
+          cache: "no-store",
+          signal: controller.signal,
+        })
+        if (!response.ok) throw new Error(`Failed to load collections (${response.status})`)
+        const data: unknown = await response.json()
+        if (!isAgentCollectionsResponse(data)) throw new Error("The collection list response is invalid")
+        setCollections(data.collections)
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error("Failed to load available collections", error)
+          setCollectionLoadError(true)
+        }
+      }
+    }
+
+    void fetchCollections()
     return () => controller.abort()
   }, [])
 
@@ -775,6 +815,7 @@ export function ChatLayout() {
         message: trimmedText,
         thread_id: activeId,
         model: selectedModel ?? undefined,
+        collection_id: selectedCollectionId ?? undefined,
       })
       await runAgentStream(response, activeId, shouldGenerateTitle)
     } catch (error) {
@@ -1153,6 +1194,26 @@ export function ChatLayout() {
                     </ModelSelectorContent>
                   </ModelSelector>
                 )}
+                <Select
+                  key={selectedCollectionId ?? "all"}
+                  defaultValue={selectedCollectionId ?? "all"}
+                  value={selectedCollectionId ?? "all"}
+                  onValueChange={(value) => setSelectedCollectionId(value === "all" ? null : value)}
+                  disabled={collectionLoadError}
+                >
+                  <SelectTrigger aria-label="Filter by collection" className="max-w-[min(14rem,45vw)]">
+                    <FolderOpen className="size-3.5 shrink-0" />
+                    <SelectValue placeholder="All files" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All files</SelectItem>
+                    {collections.map((collection) => (
+                      <SelectItem key={collection.id} value={collection.id}>
+                        {collection.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </PromptInputTools>
               <PromptInputSubmit
                 status={loading ? "streaming" : "ready"}
@@ -1164,6 +1225,11 @@ export function ChatLayout() {
           {modelLoadError && (
             <p role="status" className="mx-auto mt-2 max-w-4xl text-center text-xs text-muted-foreground">
               Available models could not be loaded; Amber will use the configured default.
+            </p>
+          )}
+          {collectionLoadError && (
+            <p role="status" className="mx-auto mt-2 max-w-4xl text-center text-xs text-muted-foreground">
+              Collections could not be loaded; searches will include all files.
             </p>
           )}
           <p className="mx-auto mt-2 max-w-4xl text-center text-[11px] text-muted-foreground">

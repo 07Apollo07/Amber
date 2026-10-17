@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter
@@ -17,11 +18,14 @@ def me(user: CurrentUser, conn: DbDep, settings: SettingsDep) -> dict[str, Any]:
     """The signed-in user's profile, role and Drive status. Only these fields leave the API."""
     token = repository.get_token(conn, user["id"])
     scopes = token["scopes"] if token else ""
-    if drive_connected(token is not None, scopes):
+    sync_warning = None
+    sync_state = repository.get_drive_sync_state(conn, user["id"])
+    if sync_state and drive_connected(token is not None, scopes):
         try:
             drive_sync.ensure_drive_watch(user["id"], conn, settings)
-        except Exception as exc:
-            log.warning("Could not start Drive change notifications for user %s: %s", user["id"], exc)
+        except drive_sync.DriveSyncError as exc:
+            sync_warning = str(exc)
+        sync_state = repository.get_drive_sync_state(conn, user["id"])
     return {
         "id": str(user["id"]),
         "email": user["email"],
@@ -33,5 +37,10 @@ def me(user: CurrentUser, conn: DbDep, settings: SettingsDep) -> dict[str, Any]:
             "connected": drive_connected(token is not None, scopes),
             "can_share": can_manage_drive_sharing(scopes),
             "scopes": sorted(set(scopes.split())),
+            "permission_sync": {
+                "active": bool(sync_state and sync_state["channel_expires"] > datetime.now(UTC)),
+                "expires_at": sync_state["channel_expires"].isoformat() if sync_state else None,
+                "warning": sync_warning,
+            },
         },
     }

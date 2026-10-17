@@ -323,6 +323,8 @@ def disconnect_drive(request: Request, user: CurrentUser, settings: SettingsDep,
     repository.delete_drive_sync_state(conn, user["id"])
     revoked = True
     if stored is not None:
+        drive_sync.stop_drive_watch(user["id"], conn)
+        repository.delete_drive_sync_state(conn, user["id"])
         try:
             refresh_token = decrypt_token(settings, stored["encrypted_refresh_token"], aad=str(user["id"]))
         except Exception as exc:

@@ -37,6 +37,7 @@ def ensure_drive_watch(
     force: bool = False,
 ) -> bool:
     """Create or renew the user's Drive watch, retaining the current cursor when renewing."""
+    repository.lock_drive_sync_owner(conn, user_id)
     existing = repository.get_drive_sync_state(conn, user_id)
     now = datetime.now(UTC)
     if existing and not force and existing["channel_expires"] > now + WATCH_RENEWAL_WINDOW:
@@ -146,6 +147,7 @@ def process_drive_changes(conn: Connection, sync_state: dict[str, Any]) -> int:
     if not user:
         raise DriveSyncError("The Drive account owner no longer exists")
     repository.set_app_user_context(conn, user["email"], user.get("domain"))
+    repository.set_drive_sync_context(conn)
 
     service = drive.build_drive_service(user_id, conn)
     if service is None:
@@ -163,7 +165,7 @@ def process_drive_changes(conn: Connection, sync_state: dict[str, Any]) -> int:
                     pageToken=page_token,
                     pageSize=1000,
                     includeRemoved=True,
-                    fields="nextPageToken,newStartPageToken,changes(fileId,removed,file(id,trashed))",
+                    fields="nextPageToken,newStartPageToken,changes(fileId,removed,file(id,trashed,driveId,owners(displayName,emailAddress)))",
                 )
                 .execute()
             )
@@ -181,22 +183,41 @@ def process_drive_changes(conn: Connection, sync_state: dict[str, Any]) -> int:
             if not document:
                 continue
 
-            removed = bool(change.get("removed") or file.get("trashed"))
-            if not removed:
-                # Content may have changed: (re)start this file's quiet period. Re-indexing happens later.
-                repository.mark_drive_file_dirty(
-                    conn, document_id=document["id"], user_id=user_id, drive_file_id=file_id
+            if change.get("removed") and not file.get("trashed"):
+                repository.remove_document_user_access(conn, document["id"], user["email"])
+                remaining = [
+                    {"grant_type": grant["principal_type"], "grantee": grant["principal_value"]}
+                    for grant in repository.get_document_access(conn, document["id"])
+                ]
+                sharing_option = drive.sharing_option_for_grants(
+                    remaining, document.get("drive_owner_email")
                 )
-
-            if removed:
-                grants = [{"grant_type": "user", "grantee": user["email"].lower()}]
+                if sharing_option:
+                    repository.set_document_sharing_option(conn, document["id"], sharing_option)
+                continue
+            if file.get("trashed"):
+                grants = []
+                repository.update_drive_owner(conn, document["id"], None, None)
             else:
+                if file.get("driveId"):
+                    grants = []
+                    repository.update_drive_owner(conn, document["id"], None, None)
+                    repository.set_document_access(conn, document["id"], [])
+                    repository.set_document_sharing_option(conn, document["id"], "private")
+                    continue
                 try:
                     grants = drive.fetch_drive_permissions(service, file_id)
                 except Exception as exc:
                     raise DriveSyncError(
                         f"Could not fetch permissions for Drive file {file_id}: {type(exc).__name__}"
                     ) from exc
+                owner = (file.get("owners") or [None])[0] or {}
+                owner_email = (owner.get("emailAddress") or "").lower()
+                if owner_email and not any(
+                    g.get("grant_type") == "user" and g.get("grantee", "").lower() == owner_email for g in grants
+                ):
+                    grants.append({"grant_type": "user", "grantee": owner_email})
+                repository.update_drive_owner(conn, document["id"], owner_email or None, owner.get("displayName"))
 
             repository.set_document_access(
                 conn,
@@ -211,13 +232,9 @@ def process_drive_changes(conn: Connection, sync_state: dict[str, Any]) -> int:
                     if grant.get("grant_type") in ("user", "domain") and grant.get("grantee")
                 ],
             )
-            has_domain_grant = any(grant.get("grant_type") == "domain" for grant in grants)
-            has_other_user = any(
-                grant.get("grant_type") == "user" and grant.get("grantee") != user["email"].lower()
-                for grant in grants
-            )
-            sharing_option = "domain" if has_domain_grant else "specific_people" if has_other_user else "private"
-            repository.set_document_sharing_option(conn, document["id"], sharing_option)
+            sharing_option = drive.sharing_option_for_grants(grants, document.get("drive_owner_email"))
+            if sharing_option:
+                repository.set_document_sharing_option(conn, document["id"], sharing_option)
 
         next_page_token = result.get("nextPageToken")
         if next_page_token:

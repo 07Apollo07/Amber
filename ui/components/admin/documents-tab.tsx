@@ -23,7 +23,8 @@ type AdminDocument = {
   sharing_option: "private" | "specific_people" | "domain"
   file_size_bytes: number
   chunk_count: number
-  owner: { name: string | null; email: string }
+  owner: { name: string | null; email: string | null }
+  imported_by: { name: string | null; email: string | null }
   drive_url: string | null
   tags: string[]
   access: Grant[]
@@ -40,8 +41,9 @@ const SHARING: Record<AdminDocument["sharing_option"], string> = {
 function accessSummary(doc: AdminDocument) {
   const domain = doc.access.find((g) => g.type === "domain")
   if (domain) return `Everyone at @${domain.value}`
-  const others = doc.access.filter((g) => g.type === "user" && g.value !== doc.owner.email.toLowerCase()).length
-  return others === 0 ? "Only the owner" : `Owner + ${others} ${others === 1 ? "person" : "people"}`
+  const ownerEmail = doc.owner.email?.toLowerCase()
+  const others = doc.access.filter((g) => g.type === "user" && g.value !== ownerEmail).length
+  return others === 0 ? "Only the owner" : `${others} ${others === 1 ? "person" : "people"}`
 }
 
 export function DocumentsTab() {
@@ -50,7 +52,7 @@ export function DocumentsTab() {
   const [aclDoc, setAclDoc] = useState<AdminDocument | null>(null)
   const needle = query.toLowerCase()
   const rows = (data?.documents ?? []).filter((d) =>
-    `${d.title} ${d.owner.name ?? ""} ${d.owner.email} ${d.tags.join(" ")}`.toLowerCase().includes(needle),
+    `${d.title} ${d.owner.name ?? ""} ${d.owner.email ?? ""} ${d.imported_by.name ?? ""} ${d.imported_by.email ?? ""} ${d.tags.join(" ")}`.toLowerCase().includes(needle),
   )
 
   return (
@@ -78,7 +80,7 @@ export function DocumentsTab() {
           <TableHeader>
             <TableRow>
               <TableHead className="pl-4">Document</TableHead>
-              <TableHead>Owner</TableHead>
+              <TableHead>Drive owner / added by</TableHead>
               <TableHead>Source</TableHead>
               <TableHead>Access</TableHead>
               <TableHead>Status</TableHead>
@@ -102,8 +104,11 @@ export function DocumentsTab() {
                   </div>
                 </TableCell>
                 <TableCell>
-                  <div className="text-sm">{doc.owner.name ?? doc.owner.email}</div>
-                  <div className="text-xs text-muted-foreground">{doc.owner.email}</div>
+                  <div className="text-sm">{doc.owner.name ?? doc.owner.email ?? "Unknown Drive owner"}</div>
+                  <div className="text-xs text-muted-foreground">Owner · {doc.owner.email ?? "Unknown"}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Added by · {doc.imported_by.name ?? doc.imported_by.email ?? "Unknown"}
+                  </div>
                 </TableCell>
                 <TableCell className="text-muted-foreground">{doc.origin === "drive_sync" ? "Drive" : "Upload"}</TableCell>
                 <TableCell>
@@ -140,7 +145,7 @@ export function DocumentsTab() {
           <DialogHeader>
             <DialogTitle className="pr-6">Who can access “{aclDoc?.title}”</DialogTitle>
             <DialogDescription>
-              Owned by {aclDoc?.owner.email}. Search results are filtered by this list.
+              Owned by {aclDoc?.owner.email ?? "an unknown Drive owner"}. Search results are filtered by this list.
             </DialogDescription>
           </DialogHeader>
           <ul className="divide-y divide-border/60 rounded-xl border">
@@ -149,7 +154,7 @@ export function DocumentsTab() {
                 {g.type === "domain" ? <Building2 className="size-4 text-muted-foreground" /> : <User className="size-4 text-muted-foreground" />}
                 <span className="flex-1 break-all">{g.type === "domain" ? `Everyone at @${g.value}` : g.value}</span>
                 <span className="text-xs text-muted-foreground">
-                  {g.type === "user" && g.value === aclDoc.owner.email.toLowerCase()
+                  {g.type === "user" && g.value === aclDoc.owner.email?.toLowerCase()
                     ? "Owner"
                     : g.origin === "drive_sync"
                       ? "From Google Drive"

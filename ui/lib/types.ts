@@ -131,6 +131,8 @@ export type UploadRow = {
   /** False for an upload that has not reached the server yet. */
   saved: boolean
   tags: string[]
+  collections: { id: string; name: string }[]
+  /** Legacy single-collection projection; new UI must use `collections`. */
   collection: string | null
   collectionId: string | null
   sharing: Sharing
@@ -140,6 +142,8 @@ export type UploadRow = {
   chunkCount: number
   /** The Amber user who added the file. */
   owner: { name: string | null; email: string | null }
+  /** The Amber user who first initiated indexing; informational only. */
+  importedBy: { name: string | null; email: string | null }
   /** False for files shared with the user by someone else. */
   isOwner: boolean
 }
@@ -148,6 +152,10 @@ export type UploadRow = {
 export type Collection = {
   id: string
   name: string
+  owner?: { name: string | null; email: string | null }
+  isOwner?: boolean
+  role?: string
+  members?: { type: "user" | "domain"; value: string; role: "reader" | "writer" }[]
 }
 
 export type SearchHistoryItem = {
@@ -170,5 +178,10 @@ export type SessionUser = {
   picture: string | null
   domain: string | null
   role: Role
-  drive: { connected: boolean; can_share: boolean; scopes: string[] }
+  drive: {
+    connected: boolean
+    can_share: boolean
+    scopes: string[]
+    permission_sync?: { active: boolean; expires_at: string | null; warning: string | null }
+  }
 }

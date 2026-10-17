@@ -31,14 +31,30 @@ type ApiDocument = {
   sharing: Sharing
   updated_at: string
   chunk_count: number
+  collections: { id: string; name: string }[]
   owner: { name: string | null; email: string | null }
+  imported_by: { name: string | null; email: string | null }
+  is_owner: boolean
+}
+
+type ApiCollection = Omit<Collection, "isOwner"> & {
   is_owner: boolean
 }
 
 async function fetchMine() {
   const res = await fetch("/api/documents/mine", { credentials: "same-origin" })
   if (!res.ok) throw new Error(`Request failed (${res.status})`)
-  return (await res.json()) as { documents: ApiDocument[]; collections: Collection[]; tags: string[] }
+  return (await res.json()) as {
+    documents: ApiDocument[]
+    collections: ApiCollection[]
+    tags: string[]
+    drive_sync?: { active: boolean; expires_at: string | null; warning: string | null }
+  }
+}
+
+function toCollection(collection: ApiCollection): Collection {
+  const { is_owner, ...rest } = collection
+  return { ...rest, isOwner: is_owner }
 }
 
 function toRow(doc: ApiDocument): UploadRow {
@@ -53,12 +69,14 @@ function toRow(doc: ApiDocument): UploadRow {
     driveUrl: doc.drive_url,
     saved: true,
     tags: doc.tags,
+    collections: doc.collections ?? [],
     collection: doc.collection,
     collectionId: doc.collection_id,
     sharing: doc.sharing,
     updatedAt: doc.updated_at,
     chunkCount: doc.chunk_count,
     owner: doc.owner,
+    importedBy: doc.imported_by,
     isOwner: doc.is_owner,
   }
 }
@@ -72,6 +90,7 @@ export function UploadPage() {
   const [pending, setPending] = useState<UploadRow[]>([])
   const [collections, setCollections] = useState<Collection[]>([])
   const [knownTags, setKnownTags] = useState<string[]>([])
+  const [driveSyncWarning, setDriveSyncWarning] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
   const [managing, setManaging] = useState<UploadRow | null>(null)
 
@@ -79,8 +98,9 @@ export function UploadPage() {
     try {
       const data = await fetchMine()
       setSaved(data.documents.map(toRow))
-      setCollections(data.collections)
+      setCollections(data.collections.map(toCollection))
       setKnownTags(data.tags)
+      setDriveSyncWarning(data.drive_sync?.warning ?? null)
     } catch {
       toast.error("Couldn't load your documents")
     } finally {
@@ -94,8 +114,9 @@ export function UploadPage() {
       .then((data) => {
         if (cancelled) return
         setSaved(data.documents.map(toRow))
-        setCollections(data.collections)
+        setCollections(data.collections.map(toCollection))
         setKnownTags(data.tags)
+        setDriveSyncWarning(data.drive_sync?.warning ?? null)
       })
       .catch(() => !cancelled && toast.error("Couldn't load your documents"))
       .finally(() => !cancelled && setLoaded(true))
@@ -126,12 +147,14 @@ export function UploadPage() {
             driveUrl: null,
             saved: false,
             tags: [],
+            collections: [],
             collection: null,
             collectionId: null,
             sharing: { kind: "private" },
             updatedAt: new Date().toISOString(),
             chunkCount: 0,
             owner: { name: user.name, email: user.email },
+            importedBy: { name: user.name, email: user.email },
             isOwner: true,
           },
           ...p,
@@ -200,6 +223,12 @@ export function UploadPage() {
             </Button>
           </div>
         )}
+        {driveSyncWarning && (
+          <div className="mb-4 flex items-start gap-2 rounded-xl border border-warning/30 bg-warning/10 px-3 py-2.5 text-sm" role="status">
+            <ShieldAlert className="mt-0.5 size-4 shrink-0 text-warning" />
+            <span>Drive permission sync is not active: {driveSyncWarning}</span>
+          </div>
+        )}
         {loaded ? (
           <ManageFiles
             pending={pending}
@@ -219,7 +248,6 @@ export function UploadPage() {
         <DocumentSettingsDialog
           row={managing}
           domain={user.domain}
-          collections={collections}
           knownTags={knownTags}
           onClose={() => setManaging(null)}
           onSaved={() => void refresh()}

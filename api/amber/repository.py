@@ -142,6 +142,78 @@ def delete_token(conn: Connection, user_id: uuid.UUID) -> None:
     execute(conn, "DELETE FROM oauth_tokens WHERE user_id = %(id)s", {"id": user_id})
 
 
+def lock_drive_sync_owner(conn: Connection, user_id: uuid.UUID) -> None:
+    fetch_one(conn, "SELECT id FROM users WHERE id = %(id)s FOR UPDATE", {"id": user_id})
+
+
+def get_drive_sync_state(conn: Connection, user_id: uuid.UUID, *, for_update: bool = False) -> Row | None:
+    lock = " FOR UPDATE" if for_update else ""
+    return fetch_one(
+        conn,
+        f"SELECT * FROM drive_sync_state WHERE user_id = %(id)s{lock}",
+        {"id": user_id},
+    )
+
+
+def get_drive_sync_state_by_channel(
+    conn: Connection, channel_id: str, *, for_update: bool = False
+) -> Row | None:
+    lock = " FOR UPDATE" if for_update else ""
+    return fetch_one(
+        conn,
+        f"SELECT * FROM drive_sync_state WHERE channel_id = %(channel_id)s{lock}",
+        {"channel_id": channel_id},
+    )
+
+
+def save_drive_sync_state(
+    conn: Connection,
+    *,
+    user_id: uuid.UUID,
+    page_token: str,
+    channel_id: str,
+    resource_id: str,
+    token_hash: str,
+    channel_expires: datetime,
+) -> None:
+    execute(
+        conn,
+        """
+        INSERT INTO drive_sync_state
+            (user_id, page_token, channel_id, resource_id, token_hash, channel_expires, updated_at)
+        VALUES
+            (%(user_id)s, %(page_token)s, %(channel_id)s, %(resource_id)s, %(token_hash)s, %(channel_expires)s, now())
+        ON CONFLICT (user_id) DO UPDATE
+           SET page_token = EXCLUDED.page_token,
+               channel_id = EXCLUDED.channel_id,
+               resource_id = EXCLUDED.resource_id,
+               token_hash = EXCLUDED.token_hash,
+               channel_expires = EXCLUDED.channel_expires,
+               updated_at = now()
+        """,
+        {
+            "user_id": user_id,
+            "page_token": page_token,
+            "channel_id": channel_id,
+            "resource_id": resource_id,
+            "token_hash": token_hash,
+            "channel_expires": channel_expires,
+        },
+    )
+
+
+def advance_drive_sync_cursor(conn: Connection, user_id: uuid.UUID, page_token: str) -> None:
+    execute(
+        conn,
+        "UPDATE drive_sync_state SET page_token = %(page_token)s, updated_at = now() WHERE user_id = %(user_id)s",
+        {"user_id": user_id, "page_token": page_token},
+    )
+
+
+def delete_drive_sync_state(conn: Connection, user_id: uuid.UUID) -> None:
+    execute(conn, "DELETE FROM drive_sync_state WHERE user_id = %(user_id)s", {"user_id": user_id})
+
+
 # ---- signed-out sessions ----
 
 
@@ -203,6 +275,11 @@ def set_app_user_context(conn: Connection, user_email: str, user_domain: str | N
     execute(conn, "SELECT set_config('app.user_domain', %(domain)s, true)", {"domain": user_domain or ""})
 
 
+def set_drive_sync_context(conn: Connection) -> None:
+    """Allow trusted Drive imports and webhook reconciliation to access source records."""
+    execute(conn, "SELECT set_config('app.drive_sync', 'true', true)")
+
+
 # ---- Documents ----
 
 
@@ -210,6 +287,9 @@ def upsert_document(
     conn: Connection,
     *,
     owner_id: uuid.UUID,
+    imported_by_user_id: uuid.UUID | None = None,
+    drive_owner_email: str | None = None,
+    drive_owner_name: str | None = None,
     origin: str,
     drive_file_id: str | None = None,
     title: str,
@@ -226,8 +306,8 @@ def upsert_document(
     if drive_file_id:
         existing = fetch_one(
             conn,
-            "SELECT id FROM documents WHERE owner_id = %(owner_id)s AND drive_file_id = %(drive_file_id)s",
-            {"owner_id": owner_id, "drive_file_id": drive_file_id},
+            "SELECT id FROM documents WHERE drive_file_id = %(drive_file_id)s ORDER BY created_at LIMIT 1",
+            {"drive_file_id": drive_file_id},
         )
     elif sha256:
         existing = fetch_one(
@@ -242,6 +322,8 @@ def upsert_document(
             """
             UPDATE documents
             SET title = %(title)s,
+                drive_owner_email = COALESCE(%(drive_owner_email)s, drive_owner_email),
+                drive_owner_name = COALESCE(%(drive_owner_name)s, drive_owner_name),
                 file_type = %(file_type)s,
                 file_size_bytes = %(file_size_bytes)s,
                 mime_type = %(mime_type)s,
@@ -256,6 +338,8 @@ def upsert_document(
             {
                 "id": existing["id"],
                 "title": title,
+                "drive_owner_email": drive_owner_email.lower() if drive_owner_email else None,
+                "drive_owner_name": drive_owner_name,
                 "file_type": file_type,
                 "file_size_bytes": file_size_bytes,
                 "mime_type": mime_type,
@@ -269,12 +353,22 @@ def upsert_document(
         row = fetch_one(
             conn,
             """
-            INSERT INTO documents (owner_id, origin, drive_file_id, title, file_type, file_size_bytes, mime_type, sha256, status, status_message, sharing_option, updated_at)
-            VALUES (%(owner_id)s, %(origin)s, %(drive_file_id)s, %(title)s, %(file_type)s, %(file_size_bytes)s, %(mime_type)s, %(sha256)s, %(status)s, %(status_message)s, %(sharing_option)s, now())
+            INSERT INTO documents (
+                owner_id, imported_by_user_id, drive_owner_email, drive_owner_name, origin, drive_file_id,
+                title, file_type, file_size_bytes, mime_type, sha256, status, status_message, sharing_option, updated_at
+            )
+            VALUES (
+                %(owner_id)s, %(imported_by_user_id)s, %(drive_owner_email)s, %(drive_owner_name)s, %(origin)s,
+                %(drive_file_id)s, %(title)s, %(file_type)s, %(file_size_bytes)s, %(mime_type)s, %(sha256)s,
+                %(status)s, %(status_message)s, %(sharing_option)s, now()
+            )
             RETURNING *
             """,
             {
                 "owner_id": owner_id,
+                "imported_by_user_id": imported_by_user_id or owner_id,
+                "drive_owner_email": drive_owner_email.lower() if drive_owner_email else None,
+                "drive_owner_name": drive_owner_name,
                 "origin": origin,
                 "drive_file_id": drive_file_id,
                 "title": title,
@@ -299,8 +393,8 @@ def get_document(conn: Connection, document_id: uuid.UUID) -> Row | None:
 def get_document_by_drive_file_id(conn: Connection, owner_id: uuid.UUID, drive_file_id: str) -> Row | None:
     return fetch_one(
         conn,
-        "SELECT * FROM documents WHERE owner_id = %(owner_id)s AND drive_file_id = %(drive_file_id)s",
-        {"owner_id": owner_id, "drive_file_id": drive_file_id},
+        "SELECT * FROM documents WHERE drive_file_id = %(drive_file_id)s ORDER BY created_at LIMIT 1",
+        {"drive_file_id": drive_file_id},
     )
 
 
@@ -484,8 +578,7 @@ def list_documents(
         conn,
         """
         SELECT d.* FROM documents d
-         WHERE d.owner_id = %(user_id)s
-            OR EXISTS (
+         WHERE EXISTS (
                  SELECT 1 FROM document_access da
                   WHERE da.document_id = d.id
                     AND ((da.principal_type = 'user' AND da.principal_value = %(email)s)
@@ -561,6 +654,20 @@ def set_document_access(conn: Connection, document_id: uuid.UUID, grants: list[d
                 "origin": origin,
             },
         )
+
+
+def update_drive_owner(
+    conn: Connection, document_id: uuid.UUID, owner_email: str | None, owner_name: str | None
+) -> None:
+    execute(
+        conn,
+        """
+        UPDATE documents
+           SET drive_owner_email = %(email)s, drive_owner_name = %(name)s, updated_at = now()
+         WHERE id = %(id)s
+        """,
+        {"id": document_id, "email": owner_email.lower() if owner_email else None, "name": owner_name},
+    )
 
 
 def get_document_access(conn: Connection, document_id: uuid.UUID) -> list[Row]:
@@ -1086,29 +1193,38 @@ def list_settings(conn: Connection) -> list[Row]:
 def list_accessible_documents(
     conn: Connection, *, user_id: uuid.UUID, user_email: str, user_domain: str | None, limit: int = 200
 ) -> list[Row]:
-    """Every document the user owns or has been granted (by email or domain), newest first, each with `tags`
-    (names), `collection` (the user's own collection holding it, or None), `is_owner` and `access` (the
-    user/domain grants). Access is checked explicitly because row-level security is skipped for table owners."""
+    """Documents accessible through current Drive ACLs, with their source owner and collection memberships."""
     return fetch_all(
         conn,
         """
         SELECT d.*,
-               (d.owner_id = %(user_id)s) AS is_owner,
+               (CASE WHEN d.drive_file_id IS NULL THEN d.owner_id = %(user_id)s
+                     ELSE lower(COALESCE(d.drive_owner_email, '')) = %(email)s END) AS is_owner,
                (SELECT count(*) FROM chunks ch WHERE ch.document_id = d.id) AS chunk_count,
-               (SELECT u.name FROM users u WHERE u.id = d.owner_id) AS owner_name,
-               (SELECT u.email FROM users u WHERE u.id = d.owner_id) AS owner_email,
+               CASE WHEN d.drive_file_id IS NULL THEN creator.name ELSE d.drive_owner_name END AS owner_name,
+               CASE WHEN d.drive_file_id IS NULL THEN creator.email ELSE d.drive_owner_email END AS owner_email,
+               (SELECT u.name FROM users u WHERE u.id = d.imported_by_user_id) AS importer_name,
+               (SELECT u.email FROM users u WHERE u.id = d.imported_by_user_id) AS importer_email,
                COALESCE((SELECT array_agg(t.name ORDER BY t.name)
                            FROM document_tags dt JOIN tags t ON t.id = dt.tag_id
                           WHERE dt.document_id = d.id), '{}') AS tags,
-               (SELECT c.id FROM collection_documents cd JOIN collections c ON c.id = cd.collection_id
-                 WHERE cd.document_id = d.id AND c.owner_id = %(user_id)s LIMIT 1) AS collection_id,
-               (SELECT c.name FROM collection_documents cd JOIN collections c ON c.id = cd.collection_id
-                 WHERE cd.document_id = d.id AND c.owner_id = %(user_id)s LIMIT 1) AS collection,
+               COALESCE((SELECT json_agg(json_build_object('id', c.id, 'name', c.name)
+                                         ORDER BY lower(c.name))
+                           FROM collection_documents cd
+                           JOIN collections c ON c.id = cd.collection_id
+                          WHERE cd.document_id = d.id
+                            AND (c.owner_id = %(user_id)s OR EXISTS (
+                                 SELECT 1 FROM collection_members cm
+                                  WHERE cm.collection_id = c.id
+                                    AND ((cm.principal_type = 'user' AND cm.principal_value = %(email)s)
+                                      OR (cm.principal_type = 'domain' AND %(domain)s <> ''
+                                          AND cm.principal_value = %(domain)s))
+                            ))), '[]') AS collections,
                COALESCE((SELECT json_agg(json_build_object('type', da.principal_type, 'value', da.principal_value))
                            FROM document_access da WHERE da.document_id = d.id), '[]') AS access
           FROM documents d
-         WHERE d.owner_id = %(user_id)s
-            OR EXISTS (
+          JOIN users creator ON creator.id = d.owner_id
+         WHERE EXISTS (
                  SELECT 1 FROM document_access da
                   WHERE da.document_id = d.id
                     AND ((da.principal_type = 'user' AND da.principal_value = %(email)s)
@@ -1123,7 +1239,35 @@ def list_accessible_documents(
 
 def list_collections(conn: Connection, owner_id: uuid.UUID) -> list[Row]:
     return fetch_all(
-        conn, "SELECT id, name FROM collections WHERE owner_id = %(o)s ORDER BY lower(name)", {"o": owner_id}
+        conn,
+        """
+        SELECT c.id, c.name, c.owner_id, u.name AS owner_name, u.email AS owner_email,
+               (c.owner_id = %(id)s) AS is_owner,
+               COALESCE(cm_member.drive_role, 'owner') AS role,
+               COALESCE((SELECT json_agg(json_build_object(
+                   'type', cm.principal_type,
+                   'value', cm.principal_value,
+                   'role', cm.drive_role
+               ) ORDER BY cm.principal_type, cm.principal_value)
+                 FROM collection_members cm
+                WHERE cm.collection_id = c.id), '[]') AS members
+          FROM collections c
+          JOIN users u ON u.id = c.owner_id
+          LEFT JOIN collection_members cm_member
+            ON cm_member.collection_id = c.id
+           AND cm_member.principal_type = 'user'
+           AND cm_member.principal_value = %(email)s
+         WHERE c.owner_id = %(id)s
+            OR cm_member.collection_id IS NOT NULL
+            OR EXISTS (
+                 SELECT 1 FROM collection_members cm_domain
+                  WHERE cm_domain.collection_id = c.id
+                    AND cm_domain.principal_type = 'domain'
+                    AND cm_domain.principal_value = %(domain)s
+               )
+         ORDER BY lower(c.name)
+        """,
+        {"id": owner_id, "email": _user_email(conn, owner_id), "domain": _user_domain(conn, owner_id)},
     )
 
 
@@ -1172,10 +1316,9 @@ def list_collection_document_ids(conn: Connection, owner_id: uuid.UUID, collecti
         conn,
         """
         SELECT cd.document_id FROM collection_documents cd
-          JOIN documents d ON d.id = cd.document_id
-         WHERE cd.collection_id = %(c)s AND d.owner_id = %(o)s
+         WHERE cd.collection_id = %(c)s
         """,
-        {"c": collection_id, "o": owner_id},
+        {"c": collection_id},
     )
     return [r["document_id"] for r in rows]
 
@@ -1198,7 +1341,7 @@ def list_tag_names(conn: Connection, owner_id: uuid.UUID) -> list[str]:
 def set_document_organization(
     conn: Connection, document_id: uuid.UUID, owner_id: uuid.UUID, *, collection: str | None, tags: list[str]
 ) -> None:
-    """Replaces the document's tags and collection. Collections are created by name on first use."""
+    """Replaces tags and optionally adds the document to a collection."""
     execute(conn, "DELETE FROM document_tags WHERE document_id = %(d)s", {"d": document_id})
     for name in dict.fromkeys(tags):
         tag = fetch_one(
@@ -1216,14 +1359,6 @@ def set_document_organization(
                 {"d": document_id, "t": tag["id"]},
             )
 
-    execute(
-        conn,
-        """
-        DELETE FROM collection_documents cd USING collections c
-         WHERE cd.collection_id = c.id AND cd.document_id = %(d)s AND c.owner_id = %(o)s
-        """,
-        {"d": document_id, "o": owner_id},
-    )
     if collection:
         coll = get_collection_by_name(conn, owner_id, collection) or create_collection(conn, owner_id, collection)
         if coll:
@@ -1232,6 +1367,204 @@ def set_document_organization(
                 "INSERT INTO collection_documents (collection_id, document_id) VALUES (%(c)s, %(d)s) ON CONFLICT DO NOTHING",
                 {"c": coll["id"], "d": document_id},
             )
+
+
+def _user_email(conn: Connection, user_id: uuid.UUID) -> str:
+    row = fetch_one(conn, "SELECT lower(email) AS email FROM users WHERE id = %(id)s", {"id": user_id})
+    return row["email"] if row else ""
+
+
+def _user_domain(conn: Connection, user_id: uuid.UUID) -> str:
+    row = fetch_one(conn, "SELECT lower(COALESCE(domain, '')) AS domain FROM users WHERE id = %(id)s", {"id": user_id})
+    return row["domain"] if row else ""
+
+
+def get_accessible_collection(
+    conn: Connection, collection_id: uuid.UUID, *, user_email: str, user_domain: str | None
+) -> Row | None:
+    return fetch_one(
+        conn,
+        """
+        SELECT c.*, (c.owner_id = u.id) AS is_owner,
+               COALESCE(cm.drive_role, 'owner') AS role
+          FROM collections c
+          JOIN users u ON lower(u.email) = %(email)s
+          LEFT JOIN collection_members cm
+            ON cm.collection_id = c.id
+           AND ((cm.principal_type = 'user' AND cm.principal_value = %(email)s)
+             OR (cm.principal_type = 'domain' AND %(domain)s <> '' AND cm.principal_value = %(domain)s))
+         WHERE c.id = %(collection_id)s
+           AND (c.owner_id = u.id OR cm.collection_id IS NOT NULL)
+        """,
+        {
+            "collection_id": collection_id,
+            "email": user_email.lower(),
+            "domain": (user_domain or "").lower(),
+        },
+    )
+
+
+def list_collection_members(conn: Connection, collection_id: uuid.UUID) -> list[Row]:
+    return fetch_all(
+        conn,
+        """
+        SELECT principal_type, principal_value, drive_role
+          FROM collection_members
+         WHERE collection_id = %(id)s
+         ORDER BY principal_type, principal_value
+        """,
+        {"id": collection_id},
+    )
+
+
+def replace_collection_members(conn: Connection, collection_id: uuid.UUID, members: list[dict[str, str]]) -> None:
+    execute(conn, "DELETE FROM collection_members WHERE collection_id = %(id)s", {"id": collection_id})
+    for member in members:
+        execute(
+            conn,
+            """
+            INSERT INTO collection_members (collection_id, principal_type, principal_value, drive_role)
+            VALUES (%(collection_id)s, %(principal_type)s, %(principal_value)s, %(drive_role)s)
+            ON CONFLICT (collection_id, principal_type, principal_value)
+            DO UPDATE SET drive_role = EXCLUDED.drive_role
+            """,
+            {"collection_id": collection_id, **member},
+        )
+
+
+def add_collection_member(conn: Connection, collection_id: uuid.UUID, member: dict[str, str]) -> None:
+    execute(
+        conn,
+        """
+        INSERT INTO collection_members (collection_id, principal_type, principal_value, drive_role)
+        VALUES (%(collection_id)s, %(principal_type)s, %(principal_value)s, %(drive_role)s)
+        ON CONFLICT (collection_id, principal_type, principal_value)
+        DO UPDATE SET drive_role = EXCLUDED.drive_role
+        """,
+        {"collection_id": collection_id, **member},
+    )
+
+
+def remove_collection_member(conn: Connection, collection_id: uuid.UUID, principal_type: str, principal_value: str) -> None:
+    execute(
+        conn,
+        """
+        DELETE FROM collection_members
+         WHERE collection_id = %(collection_id)s
+           AND principal_type = %(principal_type)s
+           AND principal_value = %(principal_value)s
+        """,
+        {
+            "collection_id": collection_id,
+            "principal_type": principal_type,
+            "principal_value": principal_value,
+        },
+    )
+
+
+def count_collection_grant_references(
+    conn: Connection, document_id: uuid.UUID, principal_type: str, principal_value: str
+) -> int:
+    row = fetch_one(
+        conn,
+        """
+        SELECT count(*) AS count
+          FROM collection_documents cd
+          JOIN collection_members cm ON cm.collection_id = cd.collection_id
+         WHERE cd.document_id = %(document_id)s
+           AND cm.principal_type = %(principal_type)s
+           AND cm.principal_value = %(principal_value)s
+        """,
+        {
+            "document_id": document_id,
+            "principal_type": principal_type,
+            "principal_value": principal_value,
+        },
+    )
+    return int(row["count"]) if row else 0
+
+
+def get_collection_drive_grant(
+    conn: Connection, document_id: uuid.UUID, principal_type: str, principal_value: str
+) -> Row | None:
+    return fetch_one(
+        conn,
+        """
+        SELECT permission_id FROM collection_drive_grants
+         WHERE document_id = %(document_id)s
+           AND principal_type = %(principal_type)s
+           AND principal_value = %(principal_value)s
+        """,
+        {"document_id": document_id, "principal_type": principal_type, "principal_value": principal_value},
+    )
+
+
+def save_collection_drive_grant(
+    conn: Connection, document_id: uuid.UUID, principal_type: str, principal_value: str, permission_id: str
+) -> None:
+    execute(
+        conn,
+        """
+        INSERT INTO collection_drive_grants (document_id, principal_type, principal_value, permission_id)
+        VALUES (%(document_id)s, %(principal_type)s, %(principal_value)s, %(permission_id)s)
+        ON CONFLICT (document_id, principal_type, principal_value)
+        DO UPDATE SET permission_id = EXCLUDED.permission_id
+        """,
+        {
+            "document_id": document_id,
+            "principal_type": principal_type,
+            "principal_value": principal_value,
+            "permission_id": permission_id,
+        },
+    )
+
+
+def delete_collection_drive_grant(
+    conn: Connection, document_id: uuid.UUID, principal_type: str, principal_value: str
+) -> None:
+    execute(
+        conn,
+        """
+        DELETE FROM collection_drive_grants
+         WHERE document_id = %(document_id)s
+           AND principal_type = %(principal_type)s
+           AND principal_value = %(principal_value)s
+        """,
+        {"document_id": document_id, "principal_type": principal_type, "principal_value": principal_value},
+    )
+
+
+def add_document_to_collection(conn: Connection, collection_id: uuid.UUID, document_id: uuid.UUID) -> None:
+    execute(
+        conn,
+        """
+        INSERT INTO collection_documents (collection_id, document_id)
+        VALUES (%(collection_id)s, %(document_id)s)
+        ON CONFLICT DO NOTHING
+        """,
+        {"collection_id": collection_id, "document_id": document_id},
+    )
+
+
+def remove_document_from_collection(conn: Connection, collection_id: uuid.UUID, document_id: uuid.UUID) -> None:
+    execute(
+        conn,
+        "DELETE FROM collection_documents WHERE collection_id = %(collection_id)s AND document_id = %(document_id)s",
+        {"collection_id": collection_id, "document_id": document_id},
+    )
+
+
+def remove_document_user_access(conn: Connection, document_id: uuid.UUID, user_email: str) -> None:
+    execute(
+    conn,
+    """
+    DELETE FROM document_access
+     WHERE document_id = %(document_id)s
+       AND principal_type = 'user'
+       AND principal_value = %(email)s
+    """,
+    {"document_id": document_id, "email": user_email.lower()},
+    )
 
 
 def set_document_sharing_option(conn: Connection, document_id: uuid.UUID, sharing_option: str) -> None:
@@ -1322,7 +1655,9 @@ def list_all_documents(conn: Connection, limit: int = 500) -> list[Row]:
         """
         SELECT d.id, d.title, d.file_type, d.origin, d.status, d.status_message, d.sharing_option,
                d.drive_file_id, d.file_size_bytes, d.created_at, d.updated_at,
-               u.name AS owner_name, u.email AS owner_email,
+               CASE WHEN d.drive_file_id IS NULL THEN u.name ELSE d.drive_owner_name END AS owner_name,
+               CASE WHEN d.drive_file_id IS NULL THEN u.email ELSE d.drive_owner_email END AS owner_email,
+               importer.name AS importer_name, importer.email AS importer_email,
                (SELECT count(*) FROM chunks ch WHERE ch.document_id = d.id) AS chunk_count,
                COALESCE((SELECT array_agg(t.name ORDER BY t.name)
                            FROM document_tags dt JOIN tags t ON t.id = dt.tag_id
@@ -1330,7 +1665,9 @@ def list_all_documents(conn: Connection, limit: int = 500) -> list[Row]:
                COALESCE((SELECT json_agg(json_build_object('type', da.principal_type, 'value', da.principal_value,
                                                            'origin', da.origin) ORDER BY da.principal_type, da.principal_value)
                            FROM document_access da WHERE da.document_id = d.id), '[]') AS access
-          FROM documents d JOIN users u ON u.id = d.owner_id
+          FROM documents d
+          JOIN users u ON u.id = d.owner_id
+          LEFT JOIN users importer ON importer.id = COALESCE(d.imported_by_user_id, d.owner_id)
          ORDER BY d.created_at DESC
          LIMIT %(limit)s
         """,

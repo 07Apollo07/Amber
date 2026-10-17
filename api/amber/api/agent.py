@@ -30,6 +30,7 @@ class ChatRequest(BaseModel):
     message: str = ""
     thread_id: str | None = None
     model: str | None = Field(default=None, min_length=1, max_length=255)
+    collection_id: uuid.UUID | None = None
     decision: Literal["approve", "reject"] | None = None
     operation_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
@@ -166,6 +167,16 @@ async def stream_agent_v2(
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    if body.decision is None and body.collection_id is not None:
+        collection = repository.get_accessible_collection(
+            conn,
+            body.collection_id,
+            user_email=user["email"],
+            user_domain=user.get("domain"),
+        )
+        if collection is None:
+            raise HTTPException(status_code=404, detail="Collection not found")
+
     config = {
         "configurable": {"thread_id": thread_id},
         "metadata": {"user_email": user["email"]}
@@ -206,6 +217,7 @@ async def stream_agent_v2(
             "user_id": str(user["id"]),
             "user_email": user["email"].lower(),
             "user_domain": (user.get("domain") or "").lower() or None,
+            "collection_id": str(body.collection_id) if body.collection_id else None,
             "tasks": [],
             "visuals": {},
         }

@@ -7,7 +7,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { apiPut } from "@/lib/api"
-import type { Collection, Sharing, UploadRow } from "@/lib/types"
+import type { Sharing, UploadRow } from "@/lib/types"
 
 import { OrganizeFields } from "./organize-fields"
 import { SharingSelector } from "./sharing-selector"
@@ -16,19 +16,16 @@ import { SharingSelector } from "./sharing-selector"
 export function DocumentSettingsDialog({
   row,
   domain,
-  collections,
   knownTags,
   onClose,
   onSaved,
 }: {
   row: UploadRow
   domain: string | null
-  collections: Collection[]
   knownTags: string[]
   onClose: () => void
   onSaved: () => void
 }) {
-  const [collection, setCollection] = useState(row.collection ?? "none")
   const [tags, setTags] = useState(row.tags)
   const [sharing, setSharing] = useState<Sharing>(row.sharing)
   const [saving, setSaving] = useState(false)
@@ -37,7 +34,7 @@ export function DocumentSettingsDialog({
     setSaving(true)
     try {
       await apiPut(`/api/documents/${row.id}/organize`, {
-        collection: collection === "none" ? null : collection,
+        collection: null,
         tags,
       })
       await apiPut(`/api/documents/${row.id}/access`, {
@@ -66,12 +63,12 @@ export function DocumentSettingsDialog({
             <h3 className="mb-3 text-sm font-medium">Organize</h3>
             <OrganizeFields
               idPrefix="doc-"
-              collection={collection}
-              onCollectionChange={setCollection}
+              collection="none"
+              onCollectionChange={() => undefined}
               tags={tags}
               onTagsChange={setTags}
-              collections={collections.map((c) => c.name)}
               knownTags={knownTags}
+              showCollection={false}
             />
           </section>
           <section>
