@@ -57,7 +57,7 @@ Company knowledge sits in Drive folders, shared docs, spreadsheets and PDFs. Fin
 - **Quick mode:** one answer plus ranked sources.
 - **Chat mode:** multi-turn, streamed conversations with saved history, rename, and per-user access control.
 - Filters by source, collection, file type and date. A side panel previews the source, and thumbs up/down feedback is recorded.
-- **Hybrid retrieval:** vector search (pgvector, HNSW) combined with keyword search and reranking.
+- **Hybrid retrieval:** vector search (pgvector, HNSW) combined with Postgres full-text keyword search.
 - **Generative UI:** the agent can render charts, tables, KPI cards, comparisons, timelines and source cards from retrieved data.
 - **Model choice:** Gemini by default; a model selector appears when a [LiteLLM](https://github.com/BerriAI/litellm) endpoint is configured.
 
@@ -81,7 +81,7 @@ Company knowledge sits in Drive folders, shared docs, spreadsheets and PDFs. Fin
 
 ## Security model
 
-- **Access control is part of the search query itself.** Retrieval joins chunks to their document's access list (copied from Drive) inside the same SQL as the vector search, so hidden content is never fetched. Postgres Row-Level Security is a second layer.
+- **Access control is part of the search query itself.** The search SQL checks each document's access list (copied from Drive) in the same query as the vector search, so hidden content is never fetched. Postgres Row-Level Security, forced even for the table owner, is an independent second check.
 - **Per-document checks everywhere.** Opening a document, previewing a source or letting the agent read a file all go through the same access list, which guards against guessing IDs.
 - **No tokens in the browser.** Google sign-in runs server-side (PKCE, state, nonce). The session is an HttpOnly Firebase session cookie, with CSRF protection on every state-changing request.
 - **Refresh tokens are encrypted** with Cloud KMS (AES-256-GCM, bound to the user).

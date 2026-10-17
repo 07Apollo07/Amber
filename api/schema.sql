@@ -8,6 +8,11 @@
 
 BEGIN;
 
+-- The tables below use FORCE ROW LEVEL SECURITY, which applies the policies to their owner too.
+-- This script runs as the owner and rewrites existing rows (the duplicate-document cleanup), so it
+-- enables the trusted-sync flag for this transaction only.
+SELECT set_config('app.drive_sync', 'true', true);
+
 CREATE TABLE IF NOT EXISTS users (
     id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     firebase_uid   varchar(128) NOT NULL UNIQUE,
@@ -312,6 +317,12 @@ CREATE TABLE IF NOT EXISTS settings (
 ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_access ENABLE ROW LEVEL SECURITY;
+-- FORCE: the policies also bind the table owner, so connecting the app as the owner (easy to do in
+-- local dev) fails closed and can't silently skip access filtering. Superusers and BYPASSRLS roles
+-- still bypass RLS, so the app must never use one.
+ALTER TABLE documents FORCE ROW LEVEL SECURITY;
+ALTER TABLE chunks FORCE ROW LEVEL SECURITY;
+ALTER TABLE document_access FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS document_access_internal_policy ON document_access;
 CREATE POLICY document_access_internal_policy ON document_access
   FOR ALL

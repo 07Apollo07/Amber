@@ -69,3 +69,14 @@ def test_failure_releases_lease_and_counts(monkeypatch):
     assert drive_sync.reindex_due_files(Conn(), S())["failed"] == 1
     assert released == [DOC["id"]]
 
+
+
+def test_search_always_filters_by_access_list(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(repository, "set_app_user_context", lambda *_: None)
+    monkeypatch.setattr(repository, "fetch_all", lambda _c, sql, params: seen.update(sql=sql, params=params) or [])
+
+    for kwargs in ({"query_text": "q"}, {"query_embedding": [0.1]}, {"query_embedding": [0.1], "query_text": "q"}, {}):
+        repository.hybrid_search_chunks(Conn(), "A@X.com", None, **kwargs)
+        assert "FROM document_access da" in seen["sql"] and seen["sql"].count("WHERE EXISTS") == 1
+        assert seen["params"]["acl_email"] == "a@x.com" and seen["params"]["acl_domain"] is None

@@ -752,7 +752,18 @@ def hybrid_search_chunks(
         "query_text": query_text or "",
     }
 
-    filters = []
+    # The access check is explicit here as well as in the RLS policy, so search stays filtered even if
+    # RLS is skipped (a table-owner or superuser connection) or relaxed (app.drive_sync in this transaction).
+    filters = [
+        """EXISTS (
+            SELECT 1 FROM document_access da
+             WHERE da.document_id = d.id
+               AND ((da.principal_type = 'user' AND da.principal_value = %(acl_email)s)
+                    OR (da.principal_type = 'domain' AND da.principal_value = %(acl_domain)s))
+        )"""
+    ]
+    params["acl_email"] = user_email.lower()
+    params["acl_domain"] = user_domain.lower() if user_domain else None
     if collection_ids:
         filters.append(
             "d.id IN (SELECT document_id FROM collection_documents WHERE collection_id = ANY(%(collection_ids)s))"
@@ -762,7 +773,7 @@ def hybrid_search_chunks(
         filters.append("d.file_type = ANY(%(file_types)s)")
         params["file_types"] = file_types
 
-    where_clause = "WHERE " + " AND ".join(filters) if filters else ""
+    where_clause = "WHERE " + " AND ".join(filters)
 
     if query_embedding and query_text:
         sql = f"""
