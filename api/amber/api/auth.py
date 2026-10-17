@@ -211,7 +211,7 @@ def google_callback(
 
     try:
         fb = firebase.sign_in_with_google(settings, tokens["id_token"])
-    except SessionInvalid as exc:
+    except SessionInvalid:
         return _fail(settings, "firebase_signin")
 
     user = _upsert_user(conn, settings, identity, fb["uid"])

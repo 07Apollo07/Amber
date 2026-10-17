@@ -281,7 +281,7 @@ def test_drive_webhook_validates_channel_secret_before_processing(monkeypatch: p
         }
     )
 
-    response = drive_api.drive_webhook(request, object(), object())
+    response = drive_api.drive_webhook(request, object())
 
     assert response.status_code == 204
     assert processed == ["channel-1"]
@@ -299,7 +299,7 @@ def test_drive_webhook_validates_channel_secret_before_processing(monkeypatch: p
             ],
         }
     )
-    assert drive_api.drive_webhook(invalid_request, object(), object()).status_code == 204
+    assert drive_api.drive_webhook(invalid_request, object()).status_code == 204
     assert processed == ["channel-1"]
 
 

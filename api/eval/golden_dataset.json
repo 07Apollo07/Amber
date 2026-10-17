@@ -1,0 +1,16 @@
+[
+  {
+    "user_input": "What are the key guidelines for remote work expense reimbursement?",
+    "reference": "Employees can claim up to $500 annually for ergonomic home office equipment with prior management approval.",
+    "retrieved_contexts": [
+      "Remote work policy: Employees may claim up to $500 per year for home office equipment. Prior approval from manager is required."
+    ]
+  },
+  {
+    "user_input": "How do I search for files in shared collections?",
+    "reference": "Use the vector search or collection file picker tool to filter and locate documents assigned to specific collections.",
+    "retrieved_contexts": [
+      "File management and collections allow users to organize workspace documents into named collections and search them efficiently."
+    ]
+  }
+]

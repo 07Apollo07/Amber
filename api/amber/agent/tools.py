@@ -2073,7 +2073,7 @@ def _validate_sheet_batch_requests(requests: list[dict]) -> None:
         "appendDimension", "moveDimension", "insertRange", "deleteRange", "autoFill",
         "copyPaste", "cutPaste", "pasteData", "randomizeRange", "findReplace",
         "trimWhitespace", "textToColumns", "appendCells", "setBasicFilter", "clearBasicFilter",
-        "duplicateSheet", "duplicateFilterView", "appendDimension", "updateDataSource",
+        "duplicateSheet", "duplicateFilterView", "updateDataSource",
         "addDataSource", "addDataSourceTable", "deleteDataSource", "refreshDataSource",
     }
     if not requests or len(requests) > MAX_API_OPERATIONS:

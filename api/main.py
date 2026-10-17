@@ -3,8 +3,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 
-from amber.api import agent, admin, auth, collections, documents, drive, me
 from amber.agent.graph import create_agent_graph
+from amber.api import admin, agent, auth, collections, documents, drive, me
 from amber.util.config import Settings, get_settings
 from amber.util.firebase import init_firebase
 from amber.util.ratelimit import RateLimited, rate_limited_response
@@ -26,8 +26,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if dsn and settings.env != "test":
             try:
                 import asyncio
-                from psycopg_pool import AsyncConnectionPool
+
                 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+                from psycopg_pool import AsyncConnectionPool
 
                 connection_kwargs = {"autocommit": True, "prepare_threshold": 0}
                 pool = AsyncConnectionPool(conninfo=dsn, max_size=20, kwargs=connection_kwargs)

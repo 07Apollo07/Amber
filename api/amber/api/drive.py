@@ -3,10 +3,9 @@
 import hashlib
 import hmac
 import logging
-from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel
 
 from amber import repository
@@ -224,7 +223,7 @@ def drive_webhook(request: Request, conn: DbDep) -> Response:
         request.headers.get("X-Goog-Channel-Token"),
         request.headers.get("X-Goog-Resource-ID"),
     ):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown Drive notification channel")
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     try:
         drive_sync.process_drive_changes(conn, sync_state)

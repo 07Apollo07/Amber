@@ -1,8 +1,10 @@
 """Deployment script for deploying the LangGraph agent to Vertex AI Agent Platform (Agent Engine)."""
 
 import os
+
 import vertexai
 from vertexai import agent_engines
+
 from amber.agent.tools import vector_search, web_search
 
 
@@ -42,7 +44,7 @@ def deploy():
         extra_packages=["."],
     )
 
-    print(f"Successfully deployed agent!")
+    print("Successfully deployed agent!")
     print(f"Resource Name: {remote_agent.resource_name}")
 
 
