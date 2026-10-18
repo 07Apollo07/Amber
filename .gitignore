@@ -10,7 +10,7 @@ api/.gcloudignore
 api/.dockerignore
 ui/.gcloudignore
 ui/.dockerignore
-
+archify/
 claude-sesh/
 
 # C extensions
