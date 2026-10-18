@@ -1,29 +1,46 @@
 """Agent chat API endpoint with LangGraph state persistence in PostgreSQL."""
 
+import asyncio
+import base64
 import inspect
 import json
 import logging
+import os
 import time
 import uuid
 from typing import Any, Literal
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
+from google import genai
+from google.genai import types
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from amber import repository
 from amber.agent.graph import create_agent_graph, get_agent_model
+from amber.util import db
 from amber.util.config import Settings
-from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep
+from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep, cookie_names, verified_session
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 log = logging.getLogger(__name__)
 
 _MODEL_LIST_CACHE_SECONDS = 60
 _LITELLM_REQUEST_TIMEOUT_SECONDS = 10
+_LIVE_ALLOWED_EVENTS = {
+    "conversation.item.create",
+    "input_audio_buffer.append",
+    "input_audio_buffer.clear",
+    "input_audio_buffer.commit",
+    "response.cancel",
+    "response.create",
+    "session.update",
+}
+_LIVE_MAX_MESSAGE_BYTES = 256 * 1024
 
 
 class ChatRequest(BaseModel):
@@ -74,6 +91,120 @@ def _litellm_models_url(base_url: str) -> str:
     if base.endswith("/v1"):
         return f"{base}/models"
     return f"{base}/v1/models"
+
+
+def _litellm_realtime_url(base_url: str, model: str) -> str:
+    parts = urlsplit(base_url)
+    path = parts.path.rstrip("/")
+    if path.endswith("/v1/realtime"):
+        pass
+    elif path.endswith("/v1"):
+        path = f"{path}/realtime"
+    else:
+        path = f"{path}/v1/realtime"
+    scheme = {"http": "ws", "https": "wss", "ws": "ws", "wss": "wss"}.get(parts.scheme)
+    if scheme is None or not parts.netloc:
+        raise ValueError("LiteLLM base URL must be an absolute HTTP(S) URL")
+    return urlunsplit((scheme, parts.netloc, path, urlencode({"model": model}), ""))
+
+
+@router.get("/live/config")
+async def get_live_config(user: CurrentUser, settings: SettingsDep) -> dict[str, Any]:
+    """Expose only the configured Live model ID; proxy credentials remain server-side."""
+    enabled = bool(settings.litellm_base_url and settings.agent_live_model_name)
+    return {
+        "enabled": enabled,
+        "model": settings.agent_live_model_name if enabled else None,
+    }
+
+
+@router.websocket("/live")
+async def live_agent(websocket: WebSocket) -> None:
+    """Authenticate and relay Gemini Live WebSocket events through the LiteLLM proxy."""
+    settings: Settings = websocket.app.state.settings
+    if websocket.headers.get("origin") != settings.public_origin:
+        await websocket.close(code=4403, reason="Cross-origin connection blocked")
+        return
+    session_cookie_name, _, _ = cookie_names(settings)
+    if not websocket.cookies.get(session_cookie_name):
+        await websocket.close(code=4401, reason="Not signed in")
+        return
+    if not settings.litellm_base_url or not settings.agent_live_model_name:
+        await websocket.close(code=1013, reason="Live voice is not configured")
+        return
+
+    try:
+        with db.connect(settings) as conn:
+            _, claims = verified_session(websocket, settings, conn)
+            user = repository.get_user_by_firebase_uid(conn, claims["uid"])
+            if user is None or user["status"] != "active":
+                await websocket.close(code=4401, reason="Not signed in")
+                return
+    except HTTPException:
+        await websocket.close(code=4401, reason="Not signed in")
+        return
+
+    try:
+        upstream_url = _litellm_realtime_url(settings.litellm_base_url, settings.agent_live_model_name)
+    except ValueError:
+        log.exception("Invalid LiteLLM base URL for Live voice")
+        await websocket.close(code=1011, reason="Live voice is unavailable")
+        return
+
+    await websocket.accept()
+    api_key = settings.litellm_api_key.get_secret_value()
+    headers = {"OpenAI-Beta": "realtime=v1"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        async with websockets.connect(
+            upstream_url,
+            extra_headers=headers,
+            max_size=_LIVE_MAX_MESSAGE_BYTES,
+            ping_interval=20,
+            ping_timeout=20,
+        ) as upstream:
+
+            async def browser_to_proxy() -> None:
+                while True:
+                    message = await websocket.receive_text()
+                    if len(message.encode("utf-8")) > _LIVE_MAX_MESSAGE_BYTES:
+                        raise ValueError("Live voice message exceeded the size limit")
+                    try:
+                        event = json.loads(message)
+                    except ValueError as exc:
+                        raise ValueError("Live voice messages must be JSON") from exc
+                    if not isinstance(event, dict) or event.get("type") not in _LIVE_ALLOWED_EVENTS:
+                        raise ValueError("Unsupported Live voice event")
+                    await upstream.send(message)
+
+            async def proxy_to_browser() -> None:
+                async for message in upstream:
+                    if isinstance(message, bytes):
+                        await websocket.send_bytes(message)
+                    else:
+                        await websocket.send_text(message)
+
+            tasks = {
+                asyncio.create_task(browser_to_proxy()),
+                asyncio.create_task(proxy_to_browser()),
+            }
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                error = task.exception()
+                if error is not None:
+                    raise error
+    except (WebSocketDisconnect, websockets.exceptions.ConnectionClosed):
+        log.info("Live voice WebSocket disconnected")
+    except Exception:
+        log.exception("Live voice proxy failed")
+        await websocket.close(code=1011, reason="Live voice connection failed")
+    else:
+        await websocket.close(code=1000)
 
 
 async def _available_models(request: Request, settings: Settings) -> list[str]:

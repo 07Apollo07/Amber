@@ -1,7 +1,7 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
-import { Check, ChevronDown, Cpu, FolderOpen, MessageSquare, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { Check, ChevronDown, Cpu, FolderOpen, MessageSquare, MoreHorizontal, Pencil, Plus, Trash2, X } from "lucide-react"
 
 import { AmberMark } from "@/components/app/amber-logo"
 import {
@@ -74,6 +74,7 @@ import {
   isGenerativeVisual,
   type GenerativeVisual,
 } from "./generative-visual"
+import { LiveSidekick } from "./live-sidekick"
 import { ToolElement } from "./tool-element"
 
 type TextEntry = {
@@ -385,8 +386,26 @@ export function ChatLayout() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState("")
   const [savingConversationId, setSavingConversationId] = useState<string | null>(null)
+  const [sidekickOpen, setSidekickOpen] = useState(false)
   const skipNextLoadRef = useRef<string | null>(null)
   const taskPlanActiveRef = useRef(false)
+  const sidekickContext = useMemo(() => {
+    const recentMessages = entries
+      .filter((entry): entry is TextEntry => entry.kind === "text")
+      .slice(-12)
+      .map((entry) => `${entry.role === "user" ? "User" : "Amber"}: ${entry.text}`)
+      .join("\n")
+    const taskSummary = tasks.map((task) => `${task.title} (${task.status})`).join("\n")
+    return [
+      `Active conversation: ${activeId || "new conversation"}`,
+      recentMessages && `Recent conversation:\n${recentMessages}`,
+      taskSummary && `Current tasks:\n${taskSummary}`,
+      approval && `Approval awaiting the user's decision: ${approval.title}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+      .slice(-8000)
+  }, [activeId, approval, entries, tasks])
 
   async function fetchConversations(): Promise<ConversationRecord[]> {
     const response = await fetch("/api/agent/conversations")
@@ -1092,6 +1111,100 @@ export function ChatLayout() {
                 </Message>
               ))
             )}
+            {workspaceFile && (
+              <details className="w-full rounded-xl border bg-card/60">
+                <summary className="cursor-pointer px-4 py-3 text-sm font-medium">
+                  Source preview: {workspaceFile.title}
+                </summary>
+                {workspaceFile.driveUrl && (
+                  <a
+                    className="mx-4 text-xs text-primary underline-offset-4 hover:underline"
+                    href={workspaceFile.driveUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open in Drive
+                  </a>
+                )}
+                {workspaceFile.mimeType === "application/vnd.google-apps.spreadsheet" && workspaceFile.values ? (
+                  <div className="max-h-64 overflow-auto p-4 pt-2">
+                    <table className="w-full border-collapse text-left text-xs">
+                      <tbody>
+                        {workspaceFile.values.map((row, rowIndex) => (
+                          <tr key={rowIndex}>
+                            {row.map((value, columnIndex) => (
+                              <td key={columnIndex} className="max-w-48 truncate border px-2 py-1">
+                                {String(value ?? "")}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <pre className="max-h-64 overflow-auto whitespace-pre-wrap p-4 pt-2 text-xs leading-5">
+                    {workspaceFile.content}
+                  </pre>
+                )}
+              </details>
+            )}
+            {approval && (
+              <section className="w-full rounded-xl border border-primary/40 bg-primary/5 p-4">
+                <div className="flex items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <h2 className="text-sm font-semibold">Approval required: {approval.title}</h2>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      No Workspace changes happen until you approve this proposal.
+                    </p>
+                  </div>
+                  {approval.url && (
+                    <a
+                      className="shrink-0 text-xs text-primary underline-offset-4 hover:underline"
+                      href={approval.url}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Open source
+                    </a>
+                  )}
+                </div>
+                <details className="mt-3">
+                  <summary className="cursor-pointer text-xs font-medium">Review proposed change</summary>
+                  {approval.before && (
+                    <>
+                      <div className="mt-2 text-[10px] font-semibold uppercase text-muted-foreground">Current</div>
+                      <pre className="mt-1 max-h-36 overflow-auto whitespace-pre-wrap rounded bg-background p-3 text-xs">
+                        {approval.before}
+                      </pre>
+                    </>
+                  )}
+                  <div className="mt-2 text-[10px] font-semibold uppercase text-muted-foreground">Proposed</div>
+                  <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-background p-3 text-xs">
+                    {approval.after}
+                  </pre>
+                </details>
+                <div className="mt-3 flex gap-2">
+                  <Button
+                    size="sm"
+                    className="flex-1"
+                    disabled={loading}
+                    onClick={() => void respondToApproval("approve")}
+                  >
+                    Approve
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="flex-1"
+                    disabled={loading}
+                    onClick={() => void respondToApproval("reject")}
+                  >
+                    Reject
+                  </Button>
+                </div>
+              </section>
+            )}
             {loading && (
               <Message from="assistant" className="max-w-full">
                 <div className="flex w-full gap-3">
@@ -1105,26 +1218,6 @@ export function ChatLayout() {
           </ConversationContent>
           <ConversationScrollButton />
         </Conversation>
-
-        {approval && (
-          <div className="border-t border-primary/30 bg-primary/5 p-3 xl:hidden">
-            <div className="text-xs font-semibold">Review: {approval.title}</div>
-            <details className="mt-1">
-              <summary className="cursor-pointer text-xs">Show proposed change</summary>
-              <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap rounded bg-background p-2 text-[10px]">
-                {approval.after}
-              </pre>
-            </details>
-            <div className="mt-2 flex gap-2">
-              <Button size="sm" className="flex-1" disabled={loading} onClick={() => void respondToApproval("approve")}>
-                Approve
-              </Button>
-              <Button size="sm" variant="outline" className="flex-1" disabled={loading} onClick={() => void respondToApproval("reject")}>
-                Reject
-              </Button>
-            </div>
-          </div>
-        )}
 
         <div className="border-t bg-background/40 p-3 sm:px-6 sm:py-4">
           <PromptInput
@@ -1237,7 +1330,22 @@ export function ChatLayout() {
           </p>
         </div>
       </section>
-      <aside className="hidden min-w-0 flex-col gap-3 overflow-hidden xl:flex">
+      {sidekickOpen && (
+        <button
+          aria-label="Close Opal"
+          className="fixed inset-0 z-40 bg-background/70 backdrop-blur-sm xl:hidden"
+          onClick={() => setSidekickOpen(false)}
+          type="button"
+        />
+      )}
+      <aside
+        className={cn(
+          "min-w-0 flex-col gap-3 overflow-hidden",
+          sidekickOpen
+            ? "fixed inset-3 z-50 flex rounded-2xl border bg-background p-3 shadow-2xl xl:static xl:z-auto xl:border-0 xl:bg-transparent xl:p-0 xl:shadow-none"
+            : "hidden xl:flex",
+        )}
+      >
         <Queue className="min-h-0">
           <QueueSection defaultOpen>
             <QueueSectionTrigger>
@@ -1274,97 +1382,33 @@ export function ChatLayout() {
             </QueueSectionContent>
           </QueueSection>
         </Queue>
-        <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border bg-card/70">
-          <header className="border-b px-3 py-2 text-sm font-medium">Workspace</header>
-          {approval && (
-            <div className="border-b border-primary/30 bg-primary/5 p-3">
-              <div className="text-xs font-semibold">Approval required</div>
-              <div className="mt-1 text-xs text-muted-foreground">{approval.title}</div>
-              <p className="mt-2 text-[11px] text-muted-foreground">
-                No Drive changes happen until you approve this proposal.
-              </p>
-              <details className="mt-2">
-                <summary className="cursor-pointer text-xs font-medium">Review proposed content</summary>
-                {approval.before && (
-                  <>
-                    <div className="mt-2 text-[10px] font-semibold uppercase text-muted-foreground">Current</div>
-                    <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap rounded bg-background p-2 text-[10px]">
-                      {approval.before}
-                    </pre>
-                  </>
-                )}
-                <div className="mt-2 text-[10px] font-semibold uppercase text-muted-foreground">Proposed</div>
-                <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-background p-2 text-[10px]">
-                  {approval.after}
-                </pre>
-              </details>
-              <div className="mt-3 flex gap-2">
-                <Button
-                  size="sm"
-                  className="flex-1"
-                  disabled={loading}
-                  onClick={() => void respondToApproval("approve")}
-                >
-                  Approve
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="flex-1"
-                  disabled={loading}
-                  onClick={() => void respondToApproval("reject")}
-                >
-                  Reject
-                </Button>
-              </div>
-            </div>
-          )}
-          {workspaceFile ? (
-            <>
-              <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
-                <span className="truncate text-xs font-medium" title={workspaceFile.title}>
-                  {workspaceFile.title}
-                </span>
-                {workspaceFile.driveUrl && (
-                  <a
-                    className="shrink-0 text-xs text-primary underline-offset-4 hover:underline"
-                    href={workspaceFile.driveUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Open in Drive
-                  </a>
-                )}
-              </div>
-              {workspaceFile.mimeType === "application/vnd.google-apps.spreadsheet" && workspaceFile.values ? (
-                <div className="min-h-0 flex-1 overflow-auto p-3">
-                  <table className="w-full border-collapse text-left text-[11px]">
-                    <tbody>
-                      {workspaceFile.values.map((row, rowIndex) => (
-                        <tr key={rowIndex}>
-                          {row.map((value, columnIndex) => (
-                            <td key={columnIndex} className="max-w-40 truncate border px-2 py-1">
-                              {String(value ?? "")}
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap p-3 text-xs leading-5">
-                  {workspaceFile.content}
-                </pre>
-              )}
-            </>
-          ) : (
-            <div className="flex flex-1 items-center justify-center p-5 text-center text-xs text-muted-foreground">
-              A source file or document preview will appear here when the agent opens one.
-            </div>
-          )}
-        </section>
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="mb-2 flex justify-end xl:hidden">
+            <Button
+              aria-label="Close Opal"
+              onClick={() => setSidekickOpen(false)}
+              size="icon-sm"
+              variant="ghost"
+            >
+              <X className="size-4" />
+            </Button>
+          </div>
+          <LiveSidekick
+            key={activeId ?? "new-chat"}
+            context={sidekickContext}
+            draft={draft}
+            onDraftChange={setDraft}
+          />
+        </div>
       </aside>
+      <Button
+        className="fixed bottom-20 right-4 z-30 shadow-lg xl:hidden"
+        onClick={() => setSidekickOpen(true)}
+        size="sm"
+      >
+        <MessageSquare className="mr-1 size-4" />
+        Talk to Opal
+      </Button>
       <Dialog
         open={editingId !== null}
         onOpenChange={(open) => {

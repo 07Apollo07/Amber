@@ -7,12 +7,17 @@ const securityHeaders = [
   { key: "X-Frame-Options", value: "DENY" },
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-  { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=()" },
+  { key: "Permissions-Policy", value: "camera=(), microphone=(self), geolocation=(), payment=()" },
 ]
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   output: "standalone", // a self-contained server for the Docker image
+  env: {
+    NEXT_PUBLIC_AMBER_API_ORIGIN:
+      process.env.NEXT_PUBLIC_AMBER_API_ORIGIN ??
+      (process.env.NODE_ENV === "development" ? process.env.AMBER_API_ORIGIN ?? "http://127.0.0.1:8000" : ""),
+  },
   // The /api rewrite buffers request bodies; Next's 10 MB default would reject uploads below the app's own limit.
   experimental: { proxyClientMaxBodySize: "32mb" },
   async headers() {

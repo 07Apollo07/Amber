@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     agent_model_name: str = "gemini-2.5-flash"
     litellm_base_url: str = ""
     litellm_api_key: SecretStr = SecretStr("")
+    agent_live_model_name: str = "gemini-3.8-live"
 
     @property
     def public_origin(self) -> str:

@@ -9,10 +9,12 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 from pydantic import SecretStr
+from starlette.websockets import WebSocketDisconnect
 
 from amber.agent import graph as agent_graph
 from amber.agent import tools as agent_tools
 from amber.api import agent as agent_api
+from amber.util.config import Settings
 
 
 def test_litellm_models_are_loaded_from_proxy_and_cached(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,6 +51,37 @@ def test_litellm_models_are_loaded_from_proxy_and_cached(monkeypatch: pytest.Mon
     assert models == ["provider/model-a", "provider/model-b"]
     assert cached_models == models
     assert requests == [("https://litellm.example/v1/models", {"Authorization": "Bearer proxy-key"})]
+
+
+def test_litellm_realtime_url_uses_proxy_v1_endpoint() -> None:
+    assert (
+        agent_api._litellm_realtime_url("https://litellm.example/v1/", "gemini live")
+        == "wss://litellm.example/v1/realtime?model=gemini+live"
+    )
+    assert (
+        agent_api._litellm_realtime_url("https://litellm.example", "gemini-3.8-live")
+        == "wss://litellm.example/v1/realtime?model=gemini-3.8-live"
+    )
+    assert (
+        agent_api._litellm_realtime_url("https://litellm.example/v1/realtime", "gemini-3.8-live")
+        == "wss://litellm.example/v1/realtime?model=gemini-3.8-live"
+    )
+
+
+def test_agent_live_config_exposes_only_the_configured_model() -> None:
+    defaults = Settings(env="test")
+    assert defaults.agent_live_model_name == "gemini-3.8-live"
+
+    settings = Settings(
+        env="test",
+        litellm_base_url="https://litellm.example/v1",
+        agent_live_model_name="gemini-live",
+        litellm_api_key=SecretStr("proxy-key"),
+    )
+
+    config = asyncio.run(agent_api.get_live_config({"id": "user-id"}, settings))
+
+    assert config == {"enabled": True, "model": "gemini-live"}
 
 
 def test_agent_graph_uses_model_from_run_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,6 +146,18 @@ def test_agent_chat_unauthenticated(client: TestClient) -> None:
 def test_agent_v2_stream_unauthenticated(client: TestClient) -> None:
     resp = client.post("/api/agent/v2/stream", json={"message": "Hello"})
     assert resp.status_code in (401, 403)
+
+
+def test_agent_live_config_unauthenticated(client: TestClient) -> None:
+    resp = client.get("/api/agent/live/config")
+    assert resp.status_code in (401, 403)
+
+
+def test_agent_live_websocket_rejects_anonymous_connection(client: TestClient) -> None:
+    with pytest.raises(WebSocketDisconnect) as disconnect:
+        with client.websocket_connect("/api/agent/live", headers={"origin": "https://amber.test"}):
+            pytest.fail("Anonymous websocket unexpectedly connected")
+    assert disconnect.value.code == 4401
 
 
 def test_get_conversation_unauthenticated(client: TestClient) -> None:
