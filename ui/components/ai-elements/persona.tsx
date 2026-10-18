@@ -2,6 +2,7 @@
 
 import { cn } from "@/lib/utils";
 import type { RiveParameters } from "@rive-app/react-webgl2";
+import { RuntimeLoader } from "@rive-app/webgl2";
 import {
   useRive,
   useStateMachineInput,
@@ -11,6 +12,11 @@ import {
 } from "@rive-app/react-webgl2";
 import type { FC, ReactNode } from "react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
+
+if (typeof window !== "undefined") {
+  RuntimeLoader.setWasmUrl("/rive.wasm");
+  RuntimeLoader.setWasmFallbackUrl("/rive_fallback.wasm");
+}
 
 // Delays Rive initialization by one frame so that React Strict Mode's
 // immediate unmount cycle never creates a WebGL2 context. Only the
@@ -85,8 +91,7 @@ const sources = {
   opal: {
     dynamicColor: false,
     hasModel: false,
-    source:
-      "https://ejiidnob33g9ap1r.public.blob.vercel-storage.com/orb-1.2.riv",
+    source: "/opal.riv",
   },
 };
 
@@ -262,7 +267,7 @@ export const Persona: FC<PersonaProps> = memo(
             onRiveReady: stableCallbacks.onReady,
             onStop: stableCallbacks.onStop,
             src: source.source,
-            stateMachines: stateMachine,
+            stateMachine,
           }
         : null
     );
@@ -280,15 +285,19 @@ export const Persona: FC<PersonaProps> = memo(
     // property assignment — this is the intended Rive API, not a React anti-pattern.
     useEffect(() => {
       if (listeningInput) {
+        // eslint-disable-next-line react-hooks/immutability -- Rive state-machine inputs are intentionally mutable.
         listeningInput.value = state === "listening";
       }
       if (thinkingInput) {
+        // eslint-disable-next-line react-hooks/immutability -- Rive state-machine inputs are intentionally mutable.
         thinkingInput.value = state === "thinking";
       }
       if (speakingInput) {
+        // eslint-disable-next-line react-hooks/immutability -- Rive state-machine inputs are intentionally mutable.
         speakingInput.value = state === "speaking";
       }
       if (asleepInput) {
+        // eslint-disable-next-line react-hooks/immutability -- Rive state-machine inputs are intentionally mutable.
         asleepInput.value = state === "asleep";
       }
     }, [state, listeningInput, thinkingInput, speakingInput, asleepInput]);
