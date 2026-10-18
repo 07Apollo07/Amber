@@ -3,7 +3,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 
-from amber.api import auth, me
+from amber.agent.graph import create_agent_graph
+from amber.api import admin, agent, auth, collections, documents, drive, me
 from amber.util.config import Settings, get_settings
 from amber.util.firebase import init_firebase
 from amber.util.ratelimit import RateLimited, rate_limited_response
@@ -19,7 +20,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.rate_hits = {}
         if settings.env != "test":  # tests never call Firebase, so they need no Google credentials
             init_firebase(settings)
+
+        dsn = settings.database_dsn.get_secret_value() if settings.database_dsn else None
+        checkpointer = None
+        if dsn and settings.env != "test":
+            try:
+                import asyncio
+
+                from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+                from psycopg_pool import AsyncConnectionPool
+
+                connection_kwargs = {"autocommit": True, "prepare_threshold": 0}
+                pool = AsyncConnectionPool(conninfo=dsn, max_size=20, kwargs=connection_kwargs)
+                await asyncio.wait_for(pool.open(wait=True), timeout=3.0)
+                app.state.db_pool = pool
+
+                checkpointer = AsyncPostgresSaver(pool)
+                await checkpointer.setup()
+                app.state.checkpointer = checkpointer
+                app.state.agent_graph = create_agent_graph(
+                    checkpointer=checkpointer,
+                    settings=settings,
+                    workspace_writes_enabled=True,
+                )
+            except Exception as e:
+                print(f"Warning: Failed to initialize AsyncPostgresSaver checkpointer (falling back to MemorySaver): {e}")
+                from langgraph.checkpoint.memory import MemorySaver
+                checkpointer = MemorySaver()
+                app.state.checkpointer = checkpointer
+                app.state.agent_graph = create_agent_graph(checkpointer=checkpointer, settings=settings)
+        else:
+            from langgraph.checkpoint.memory import MemorySaver
+            checkpointer = MemorySaver()
+            app.state.checkpointer = checkpointer
+            app.state.agent_graph = create_agent_graph(checkpointer=checkpointer, settings=settings)
+
+        app.state.agent_legacy_graph = create_agent_graph(
+            checkpointer=checkpointer,
+            settings=settings,
+        )
+
         yield
+
+        if hasattr(app.state, "db_pool") and app.state.db_pool:
+            try:
+                app.state.db_pool.close()
+            except Exception:
+                pass
 
     is_prod = settings.env == "prod"
     app = FastAPI(
@@ -45,22 +92,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    app.include_router(admin.router)
     app.include_router(auth.router)
     app.include_router(me.router)
+    app.include_router(documents.router)
+    app.include_router(collections.router)
+    app.include_router(drive.router)
+    app.include_router(agent.router)
     return app
 
 
 def run() -> None:
     """Starts the API server. Auto-reloads on code changes in dev."""
+    import os
+
     import uvicorn
 
     settings = get_settings()
+    api_dir = os.path.dirname(os.path.abspath(__file__))
     uvicorn.run(
         "main:create_app",
         factory=True,
         host=settings.host,
         port=settings.port,
         reload=settings.env == "dev",
+        reload_dirs=[api_dir] if settings.env == "dev" else None,
         # The client IP is resolved by amber/util/net.py from AMBER_TRUSTED_PROXIES only.
         proxy_headers=False,
     )

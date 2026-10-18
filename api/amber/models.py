@@ -1,8 +1,29 @@
 """Shared constants and helpers for the auth tables (schema.sql). Rows are plain dicts."""
 
-DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+# Amber can read and change sharing only on files it created (uploads) and files the user picks in the
+# Google Picker. This is a non-restricted scope, so the app needs no Google verification.
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+
+# The old full-access scope still works for tokens granted before the switch; it is never requested any more.
+LEGACY_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+
+# Read-only access to the whole Drive, so a picked folder's files (which drive.file can't see) can be imported.
+# Google treats it as a restricted scope. Only folder import and Drive sync use it; agent tools stay on drive.file.
+DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+
+
+def can_manage_drive_sharing(scopes: str) -> bool:
+    """Saving uploads and changing Drive sharing needs drive.file (or the legacy full drive scope)."""
+    granted = (scopes or "").split()
+    return DRIVE_SCOPE in granted or LEGACY_DRIVE_SCOPE in granted
 
 
 def drive_connected(has_refresh_token: bool, scopes: str) -> bool:
-    """Drive works only with a stored refresh token that carries the drive.file scope."""
-    return has_refresh_token and DRIVE_FILE_SCOPE in scopes.split()
+    """Drive works with a stored refresh token that carries drive.file (or the legacy drive scope)."""
+    return bool(has_refresh_token) and can_manage_drive_sharing(scopes)
+
+
+def can_import_folders(scopes: str) -> bool:
+    """Listing and reading a picked folder's files needs drive.readonly (or the legacy full drive scope)."""
+    granted = (scopes or "").split()
+    return DRIVE_READONLY_SCOPE in granted or LEGACY_DRIVE_SCOPE in granted

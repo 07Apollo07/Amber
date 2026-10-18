@@ -1,55 +1,90 @@
 "use client"
 
 import { useState } from "react"
-import { Building2, Eye, MoreHorizontal, RotateCw, Search, Trash2, User } from "lucide-react"
+import { Building2, Eye, FileText, Search, User } from "lucide-react"
 
-import { FileIcon } from "@/components/app/file-icon"
-import { SharingSummary } from "@/components/app/sharing-summary"
 import { StatusBadge } from "@/components/app/status-badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { demoAction } from "@/lib/demo"
-import type { AmberDocument } from "@/lib/types"
+import { formatBytes, ingestionStatusFromApi } from "@/lib/format"
 
-// Loaded from the admin API once it exists.
-const documents: AmberDocument[] = []
+import { useAdminData } from "./use-admin-data"
 
-function accessList(doc: AmberDocument) {
-  const owner = { type: "user", value: doc.owner, note: "Owner" }
-  if (doc.sharing.kind === "private") return [owner]
-  if (doc.sharing.kind === "domain") return [owner, { type: "domain", value: doc.sharing.domain, note: "Drive: domain reader" }]
-  return [owner, ...doc.sharing.emails.map((e) => ({ type: "user", value: e, note: "Drive: reader" }))]
+type Grant = { type: "user" | "domain"; value: string; origin: string }
+type AdminDocument = {
+  id: string
+  title: string
+  file_type: string
+  origin: string
+  status: string
+  status_message: string | null
+  sharing_option: "private" | "specific_people" | "domain"
+  file_size_bytes: number
+  chunk_count: number
+  owner: { name: string | null; email: string | null }
+  imported_by: { name: string | null; email: string | null }
+  drive_url: string | null
+  tags: string[]
+  access: Grant[]
+  created_at: string
+  updated_at: string
+}
+
+const SHARING: Record<AdminDocument["sharing_option"], string> = {
+  private: "Private",
+  specific_people: "Specific people",
+  domain: "Whole domain",
+}
+
+function accessSummary(doc: AdminDocument) {
+  const domain = doc.access.find((g) => g.type === "domain")
+  if (domain) return `Everyone at @${domain.value}`
+  const ownerEmail = doc.owner.email?.toLowerCase()
+  const others = doc.access.filter((g) => g.type === "user" && g.value !== ownerEmail).length
+  return others === 0 ? "Only the owner" : `${others} ${others === 1 ? "person" : "people"}`
 }
 
 export function DocumentsTab() {
+  const { data, error } = useAdminData<{ documents: AdminDocument[] }>("/api/admin/documents")
   const [query, setQuery] = useState("")
-  const [aclDoc, setAclDoc] = useState<AmberDocument | null>(null)
-  const rows = documents.filter((d) => `${d.title} ${d.owner}`.toLowerCase().includes(query.toLowerCase()))
+  const [aclDoc, setAclDoc] = useState<AdminDocument | null>(null)
+  const needle = query.toLowerCase()
+  const rows = (data?.documents ?? []).filter((d) =>
+    `${d.title} ${d.owner.name ?? ""} ${d.owner.email ?? ""} ${d.imported_by.name ?? ""} ${d.imported_by.email ?? ""} ${d.tags.join(" ")}`.toLowerCase().includes(needle),
+  )
 
   return (
     <div className="space-y-4">
-      <div className="relative max-w-sm">
-        <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search by title or owner" className="pl-8" aria-label="Filter documents" />
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="relative w-full max-w-sm">
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by title, owner or tag"
+            className="pl-8"
+            aria-label="Filter documents"
+          />
+        </div>
+        <p className="text-xs text-muted-foreground">You can review who has access. Admins can&apos;t read document text.</p>
       </div>
+      {error && (
+        <p role="alert" className="text-sm text-destructive">
+          Couldn&apos;t load documents: {error}
+        </p>
+      )}
       <div className="overflow-hidden rounded-2xl border bg-card/40">
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead className="pl-4">Document</TableHead>
-              <TableHead>Owner</TableHead>
+              <TableHead>Drive owner / added by</TableHead>
               <TableHead>Source</TableHead>
               <TableHead>Access</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead className="text-right">Chunks</TableHead>
               <TableHead>Updated</TableHead>
               <TableHead className="w-10" />
             </TableRow>
@@ -59,45 +94,44 @@ export function DocumentsTab() {
               <TableRow key={doc.id}>
                 <TableCell className="pl-4">
                   <div className="flex items-center gap-2.5">
-                    <FileIcon type={doc.fileType} className="size-7" />
-                    <span className="max-w-[260px] truncate font-medium">{doc.title}</span>
+                    <FileText className="size-4 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0">
+                      <div className="max-w-[260px] truncate font-medium">{doc.title}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {doc.file_type.toUpperCase()} · {formatBytes(doc.file_size_bytes)}
+                      </div>
+                    </div>
                   </div>
                 </TableCell>
-                <TableCell className="text-muted-foreground">{doc.owner}</TableCell>
-                <TableCell className="text-muted-foreground">{doc.origin === "drive_picker" ? "Drive" : "Upload"}</TableCell>
                 <TableCell>
-                  <SharingSummary sharing={doc.sharing} />
+                  <div className="text-sm">{doc.owner.name ?? doc.owner.email ?? "Unknown Drive owner"}</div>
+                  <div className="text-xs text-muted-foreground">Owner · {doc.owner.email ?? "Unknown"}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Added by · {doc.imported_by.name ?? doc.imported_by.email ?? "Unknown"}
+                  </div>
+                </TableCell>
+                <TableCell className="text-muted-foreground">{doc.origin === "drive_sync" ? "Drive" : "Upload"}</TableCell>
+                <TableCell>
+                  <div className="text-sm">{SHARING[doc.sharing_option]}</div>
+                  <div className="text-xs text-muted-foreground">{accessSummary(doc)}</div>
                 </TableCell>
                 <TableCell>
-                  <StatusBadge status={doc.status} />
+                  <StatusBadge status={ingestionStatusFromApi(doc.status)} />
                 </TableCell>
-                <TableCell className="text-muted-foreground">{doc.updatedAt}</TableCell>
+                <TableCell className="text-right tabular-nums">{doc.chunk_count}</TableCell>
+                <TableCell className="text-muted-foreground">
+                  {new Date(doc.updated_at).toLocaleDateString(undefined, { dateStyle: "medium" })}
+                </TableCell>
                 <TableCell>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${doc.title}`}>
-                        <MoreHorizontal />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem onSelect={() => setAclDoc(doc)}>
-                        <Eye /> View access
-                      </DropdownMenuItem>
-                      <DropdownMenuItem onSelect={() => demoAction("Re-index queued")}>
-                        <RotateCw /> Re-index
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem variant="destructive" onSelect={() => demoAction("Removed from index")}>
-                        <Trash2 /> Remove from index
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  <Button variant="ghost" size="icon-sm" aria-label={`View access for ${doc.title}`} onClick={() => setAclDoc(doc)}>
+                    <Eye />
+                  </Button>
                 </TableCell>
               </TableRow>
             ))}
-            {rows.length === 0 && (
+            {data && rows.length === 0 && (
               <TableRow>
-                <TableCell colSpan={7} className="py-10 text-center text-muted-foreground">
+                <TableCell colSpan={8} className="py-10 text-center text-muted-foreground">
                   {query ? `No documents match “${query}”.` : "No documents have been added yet."}
                 </TableCell>
               </TableRow>
@@ -110,18 +144,31 @@ export function DocumentsTab() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle className="pr-6">Who can access “{aclDoc?.title}”</DialogTitle>
-            <DialogDescription>Synced from Google Drive sharing. Search results are filtered by this list.</DialogDescription>
+            <DialogDescription>
+              Owned by {aclDoc?.owner.email ?? "an unknown Drive owner"}. Search results are filtered by this list.
+            </DialogDescription>
           </DialogHeader>
           <ul className="divide-y divide-border/60 rounded-xl border">
-            {aclDoc &&
-              accessList(aclDoc).map((p) => (
-                <li key={p.value} className="flex items-center gap-3 px-3 py-2.5 text-sm">
-                  {p.type === "domain" ? <Building2 className="size-4 text-muted-foreground" /> : <User className="size-4 text-muted-foreground" />}
-                  <span className="flex-1">{p.type === "domain" ? `Everyone at @${p.value}` : p.value}</span>
-                  <span className="text-xs text-muted-foreground">{p.note}</span>
-                </li>
-              ))}
+            {aclDoc?.access.map((g) => (
+              <li key={`${g.type}:${g.value}`} className="flex items-center gap-3 px-3 py-2.5 text-sm">
+                {g.type === "domain" ? <Building2 className="size-4 text-muted-foreground" /> : <User className="size-4 text-muted-foreground" />}
+                <span className="flex-1 break-all">{g.type === "domain" ? `Everyone at @${g.value}` : g.value}</span>
+                <span className="text-xs text-muted-foreground">
+                  {g.type === "user" && g.value === aclDoc.owner.email?.toLowerCase()
+                    ? "Owner"
+                    : g.origin === "drive_sync"
+                      ? "From Google Drive"
+                      : "Shared in Amber"}
+                </span>
+              </li>
+            ))}
+            {aclDoc?.access.length === 0 && <li className="px-3 py-2.5 text-sm text-muted-foreground">No access entries.</li>}
           </ul>
+          {aclDoc?.status_message && aclDoc.status === "failed" && (
+            <p role="alert" className="text-xs break-words whitespace-pre-wrap text-destructive">
+              {aclDoc.status_message}
+            </p>
+          )}
         </DialogContent>
       </Dialog>
     </div>

@@ -71,11 +71,21 @@ export type TraceChunk = {
   cited: boolean
 }
 
+export type ToolCallTrace = {
+  id: string
+  name: string
+  args: string
+  result?: string
+  status: "success" | "failed" | "running"
+  latencyMs?: number
+}
+
 export type Trace = {
   id: string
   query: string
   rewrittenQuery: string
   chunks: TraceChunk[]
+  toolCalls?: ToolCallTrace[]
   hiddenCount: number
   model: string
   latencyMs: number
@@ -87,6 +97,7 @@ export type Answer = {
   markdown: string
   sources: Source[]
   trace: Trace
+  toolCalls?: ToolCallTrace[]
 }
 
 export type ChatMessage =
@@ -109,6 +120,7 @@ export type AuditEvent = {
 }
 
 export type UploadRow = {
+  /** The document id once it exists on the server; a temporary id while the upload is in flight. */
   id: string
   name: string
   sizeBytes: number
@@ -116,6 +128,34 @@ export type UploadRow = {
   progress: number
   error?: string
   driveUrl: string | null
+  /** False for an upload that has not reached the server yet. */
+  saved: boolean
+  tags: string[]
+  collections: { id: string; name: string }[]
+  /** Legacy single-collection projection; new UI must use `collections`. */
+  collection: string | null
+  collectionId: string | null
+  sharing: Sharing
+  /** ISO timestamp of the last change to the document in Amber. */
+  updatedAt: string
+  /** Chunks stored in the vector store. */
+  chunkCount: number
+  /** The Amber user who added the file. */
+  owner: { name: string | null; email: string | null }
+  /** The Amber user who first initiated indexing; informational only. */
+  importedBy: { name: string | null; email: string | null }
+  /** False for files shared with the user by someone else. */
+  isOwner: boolean
+}
+
+/** A folder of documents, owned by the signed-in user. */
+export type Collection = {
+  id: string
+  name: string
+  owner?: { name: string | null; email: string | null }
+  isOwner?: boolean
+  role?: string
+  members?: { type: "user" | "domain"; value: string; role: "reader" | "writer" }[]
 }
 
 export type SearchHistoryItem = {
@@ -138,5 +178,11 @@ export type SessionUser = {
   picture: string | null
   domain: string | null
   role: Role
-  drive: { connected: boolean; scopes: string[] }
+  drive: {
+    connected: boolean
+    can_share: boolean
+    can_import_folders?: boolean
+    scopes: string[]
+    permission_sync?: { active: boolean; expires_at: string | null; warning: string | null }
+  }
 }

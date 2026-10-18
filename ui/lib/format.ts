@@ -35,3 +35,16 @@ export function initials(name: string): string {
     .join("")
     .toUpperCase()
 }
+
+/** Maps the API's document status to the UI's. */
+export function ingestionStatusFromApi(status: string): IngestionStatus {
+  const map: Record<string, IngestionStatus> = {
+    queued: "queued",
+    saving_to_drive: "saving_to_drive",
+    parsing: "parsing",
+    indexing: "embedding",
+    indexed: "ready",
+    failed: "failed",
+  }
+  return map[status] ?? "queued"
+}

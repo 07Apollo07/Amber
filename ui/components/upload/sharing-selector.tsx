@@ -113,7 +113,7 @@ export function SharingSelector({
       )}
 
       <p className="text-xs text-muted-foreground">
-        This sharing is also applied to the file in your Google Drive. People you add get view access and no email
+        Sharing is also changed on the file in your Google Drive. People you add get view access and no email
         notification.
       </p>
     </div>

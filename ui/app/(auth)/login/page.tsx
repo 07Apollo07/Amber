@@ -1,4 +1,5 @@
 import type { Metadata } from "next"
+import Link from "next/link"
 import { redirect } from "next/navigation"
 import { CircleAlert, FileSearch, FolderUp, Lock, ShieldCheck } from "lucide-react"
 
@@ -12,8 +13,8 @@ export const metadata: Metadata = { title: "Sign in" }
 const permissions = [
   {
     icon: FileSearch,
-    title: "Read files you choose",
-    body: "Only the Drive files you pick in Amber, never your whole Drive.",
+    title: "Browse and read Drive files",
+    body: "Browse your Google Drive files to select and index them in Amber.",
   },
   {
     icon: FolderUp,
@@ -90,8 +91,15 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
         </div>
 
         <p className="mt-6 text-center text-xs text-muted-foreground">
-          Amber requests the <code className="rounded bg-muted px-1 py-0.5">drive.file</code> scope only. You can
-          disconnect Drive anytime from your profile.
+          Amber asks for read-only access to your Drive so it can import whole folders you pick. It only indexes files
+          and folders you choose, and it changes only files you pick or that it saved for you. You can disconnect Drive
+          anytime from your profile.
+        </p>
+        <p className="mt-3 text-center text-xs text-muted-foreground">
+          By signing in you agree to the{" "}
+          <Link href="/terms" className="underline underline-offset-2 hover:text-foreground">Terms and Conditions</Link>{" "}
+          and the{" "}
+          <Link href="/privacy" className="underline underline-offset-2 hover:text-foreground">Privacy Policy</Link>.
         </p>
       </div>
     </main>

@@ -24,12 +24,14 @@ export function proxy(request: NextRequest) {
 
   const csp = [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}`,
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' https://apis.google.com${isDev ? " 'unsafe-eval'" : ""}`,
     // Radix positions popovers with inline style attributes, which nonces can't cover.
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' blob: data: https://lh3.googleusercontent.com",
+    "style-src 'self' 'unsafe-inline' https://www.gstatic.com https://ssl.gstatic.com",
+    // The Google Picker (Drive file chooser) loads its script, frame, styles and thumbnails from Google.
+    "img-src 'self' blob: data: https://lh3.googleusercontent.com https://*.googleusercontent.com https://ssl.gstatic.com https://www.gstatic.com",
+    "frame-src https://docs.google.com https://drive.google.com https://content.googleapis.com https://accounts.google.com",
     "font-src 'self'",
-    `connect-src 'self'${isDev ? " ws:" : ""}`,
+    `connect-src 'self' https://apis.google.com https://content.googleapis.com${isDev ? " ws:" : ""}`,
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",

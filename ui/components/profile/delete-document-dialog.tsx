@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Trash2 } from "lucide-react"
+import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -15,12 +16,29 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
-import { demoAction } from "@/lib/demo"
 
-export function DeleteDocumentDialog({ title, inDrive }: { title: string; inDrive: boolean }) {
+export function DeleteDocumentDialog({ title, inDrive, onDelete }: { title: string; inDrive: boolean; onDelete: () => Promise<void> }) {
   const [alsoTrash, setAlsoTrash] = useState(false)
+  const [pending, setPending] = useState(false)
+  const [open, setOpen] = useState(false)
+
+  async function handleRemove() {
+    setPending(true)
+    try {
+      await onDelete()
+      toast.success("Document removed from Amber")
+      setOpen(false)
+    } catch (err) {
+      toast.error("Failed to delete document", {
+        description: err instanceof Error ? err.message : "Please try again.",
+      })
+    } finally {
+      setPending(false)
+    }
+  }
+
   return (
-    <Dialog onOpenChange={(open) => !open && setAlsoTrash(false)}>
+    <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) setAlsoTrash(false) }}>
       <DialogTrigger asChild>
         <Button variant="ghost" size="icon-sm" aria-label={`Delete ${title}`}>
           <Trash2 />
@@ -43,17 +61,12 @@ export function DeleteDocumentDialog({ title, inDrive }: { title: string; inDriv
           </label>
         )}
         <DialogFooter>
-          <DialogClose asChild>
-            <Button variant="outline">Cancel</Button>
-          </DialogClose>
-          <DialogClose asChild>
-            <Button
-              variant="destructive"
-              onClick={() => demoAction(alsoTrash ? "Removed and moved to Drive trash" : "Removed from Amber")}
-            >
-              Remove
-            </Button>
-          </DialogClose>
+          <Button variant="outline" onClick={() => setOpen(false)} disabled={pending}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={handleRemove} disabled={pending}>
+            {pending ? "Removing..." : "Remove"}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

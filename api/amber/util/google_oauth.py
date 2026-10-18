@@ -10,7 +10,7 @@ import httpx
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 
-from amber.models import DRIVE_FILE_SCOPE
+from amber.models import DRIVE_READONLY_SCOPE, DRIVE_SCOPE
 from amber.util.config import Settings
 
 AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -19,7 +19,7 @@ REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 
 # Sign-in and the Drive permission are requested together, on one consent screen.
-SCOPES = ["openid", "email", "profile", DRIVE_FILE_SCOPE]
+SCOPES = ["openid", "email", "profile", DRIVE_SCOPE, DRIVE_READONLY_SCOPE]
 
 
 class RevokeFailed(Exception):
@@ -51,7 +51,6 @@ def authorization_url(settings: Settings, *, state: str, nonce: str, code_challe
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
         "access_type": "offline",  # needed for a refresh token (Drive access while the user is away)
-        "include_granted_scopes": "true",
         # Google only issues a refresh token on consent, so force it when we need one.
         "prompt": "consent" if force_consent else "select_account",
     }
@@ -83,7 +82,9 @@ def exchange_code(settings: Settings, code: str, code_verifier: str) -> dict[str
 def verify_id_token(settings: Settings, token: str, expected_nonce: str) -> dict[str, Any]:
     """Checks signature, expiry and audience (our client id), then the claims below."""
     try:
-        claims = google_id_token.verify_oauth2_token(token, google_requests.Request(), settings.google_oauth_client_id)
+        claims = google_id_token.verify_oauth2_token(
+            token, google_requests.Request(), settings.google_oauth_client_id, clock_skew_in_seconds=10
+        )
     except ValueError as exc:
         raise OAuthError("invalid_id_token", str(exc)) from exc
     return identity_from_claims(claims, expected_nonce)

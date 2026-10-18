@@ -22,8 +22,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from amber import repository
-from amber.models import drive_connected
-from amber.util import audit, firebase, google_oauth
+from amber.models import can_import_folders, can_manage_drive_sharing, drive_connected
+from amber.util import audit, drive_sync, firebase, google_oauth
 from amber.util.config import Settings
 from amber.util.crypto import decrypt_token, encrypt_token
 from amber.util.db import Connection
@@ -168,6 +168,12 @@ def _upsert_user(conn: Connection, settings: Settings, identity: dict, firebase_
     }
     existing = repository.lock_user_by_google_sub(conn, identity["sub"])
     if existing is None:
+        # An admin may have added this person's email in advance. Their first sign-in claims that account.
+        pending = repository.lock_pending_user_by_email(conn, identity["email"])
+        if pending is not None:
+            repository.claim_pending_user(conn, pending["id"], google_sub=identity["sub"])
+            existing = repository.lock_user_by_google_sub(conn, identity["sub"])
+    if existing is None:
         role = "admin" if identity["email"] in settings.bootstrap_admins else "member"
         created = repository.insert_user(conn, google_sub=identity["sub"], role=role, **profile)
         if created is not None:
@@ -190,7 +196,7 @@ def google_callback(
     error: str | None = None,
 ) -> Response:
     pending = _read_state(request, settings)
-    if pending is None or state is None or not secrets.compare_digest(state, pending["state"]):
+    if pending is None or state is None or not secrets.compare_digest(state, pending.get("state", "")):
         return _fail(settings, "state")
     if error:
         return _fail(settings, "denied" if error == "access_denied" else "google")
@@ -205,8 +211,7 @@ def google_callback(
 
     try:
         fb = firebase.sign_in_with_google(settings, tokens["id_token"])
-    except SessionInvalid as exc:
-        log.error("Firebase sign-in failed: %s", exc)
+    except SessionInvalid:
         return _fail(settings, "firebase_signin")
 
     user = _upsert_user(conn, settings, identity, fb["uid"])
@@ -220,6 +225,21 @@ def google_callback(
     if tokens["refresh_token"]:
         blob, key_version = encrypt_token(settings, tokens["refresh_token"], aad=str(user["id"]))
         repository.save_token(conn, user["id"], encrypted=blob, key_version=key_version, scopes=tokens["scopes"])
+    elif (
+        stored is not None
+        and not (can_manage_drive_sharing(stored["scopes"]) and can_import_folders(stored["scopes"]))
+        and not pending["consent"]
+    ):
+        # Signed in before Amber asked for its current Drive scopes (drive.file, drive.readonly). The stored refresh
+        # token still carries the old ones, so ask again with prompt=consent to get a new one. Nothing is saved until
+        # that round completes.
+        conn.rollback()
+        response = RedirectResponse(
+            f"/api/auth/google/start?consent=true&return_to={quote(pending['return_to'])}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+        _clear_state(response, settings)
+        return response
     elif stored is not None:
         repository.update_token_scopes(conn, user["id"], tokens["scopes"])  # what the user has granted right now
     elif not pending["consent"]:
@@ -236,8 +256,9 @@ def google_callback(
     try:
         session_cookie = firebase.create_session_cookie(settings, fb["id_token"])
     except Exception as exc:
-        # Usually missing or under-privileged Google credentials for Firebase Admin.
-        log.error("Creating the Firebase session cookie failed: %s: %s", type(exc).__name__, exc)
+        # Firebase's own message is generic; Google's reply (which names the missing permission) is on the cause.
+        reply = getattr(getattr(getattr(exc, "cause", None), "http_response", None), "text", "")
+        log.error("Creating the Firebase session cookie failed: %s: %s Google said: %s", type(exc).__name__, exc, reply[:500])
         conn.rollback()
         return _fail(settings, "firebase_session")
 
@@ -252,6 +273,13 @@ def google_callback(
     )
     conn.commit()
 
+    if has_refresh_token and drive_connected(True, tokens["scopes"]):
+        try:
+            drive_sync.ensure_drive_watch(user["id"], conn, settings)
+        except Exception as exc:
+            log.warning("Could not start Drive change notifications for user %s: %s", user["id"], exc)
+
+    print("SUCCESS: redirecting to return_to:", pending["return_to"])
     response = _same_site_redirect(pending["return_to"])
     set_session_cookies(response, settings, session_cookie)
     _clear_state(response, settings)
@@ -296,8 +324,12 @@ def disconnect_drive(request: Request, user: CurrentUser, settings: SettingsDep,
     the grant may still exist at Google, so the UI can point the user to their Google account.
     """
     stored = repository.get_token(conn, user["id"])
+    drive_sync.stop_drive_watch(user["id"], conn)
+    repository.delete_drive_sync_state(conn, user["id"])
     revoked = True
     if stored is not None:
+        drive_sync.stop_drive_watch(user["id"], conn)
+        repository.delete_drive_sync_state(conn, user["id"])
         try:
             refresh_token = decrypt_token(settings, stored["encrypted_refresh_token"], aad=str(user["id"]))
         except Exception as exc:

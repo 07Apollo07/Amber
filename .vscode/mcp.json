@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "litellm": {
+      "url": "https://litellm.jd-pve.duckdns.org/mcp",
+      "headers": {
+        "x-litellm-api-key": "Bearer sk-QFepcvV7zAGnmq1XT_ReAw"
+      }
+    }
+  }
+}

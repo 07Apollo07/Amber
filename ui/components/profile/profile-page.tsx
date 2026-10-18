@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { CircleCheck, CircleX, ExternalLink, FileText, History, LogOut, MessageSquare, Search, ShieldCheck, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -26,7 +26,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { apiPost } from "@/lib/api"
+import { apiDelete, apiPost } from "@/lib/api"
 import { googleSignInUrl } from "@/lib/auth-paths"
 import { demoAction } from "@/lib/demo"
 import { useSession } from "@/lib/session-context"
@@ -35,8 +35,6 @@ import type { AmberDocument, Conversation, SearchHistoryItem } from "@/lib/types
 import { DeleteDocumentDialog } from "./delete-document-dialog"
 import { EditDocumentDialog } from "./edit-document-dialog"
 
-// Loaded from the API once it exists.
-const myDocuments: AmberDocument[] = []
 const conversations: Conversation[] = []
 const searchHistory: SearchHistoryItem[] = []
 
@@ -188,6 +186,57 @@ function DriveCard() {
 }
 
 function MyDocuments() {
+  const [docs, setDocs] = useState<AmberDocument[]>([])
+  const [loading, setLoading] = useState(true)
+
+  async function loadDocs() {
+    try {
+      const res = await fetch("/api/documents", { credentials: "same-origin" })
+      if (res.ok) {
+        const data = await res.json()
+        const mapped: AmberDocument[] = data.map((d: any) => {
+          let sharing: any = { kind: "private" }
+          if (d.sharing_option === "domain") sharing = { kind: "domain", domain: "workspace" }
+          else if (d.sharing_option === "specific_people") sharing = { kind: "people", emails: [] }
+
+          let status = d.status
+          if (status === "indexed") status = "ready"
+          if (status === "indexing") status = "embedding"
+
+          return {
+            id: d.id,
+            title: d.title,
+            fileType: d.file_type || "txt",
+            origin: d.origin || "desktop_upload",
+            owner: d.owner_id || "You",
+            collection: null,
+            tags: [],
+            sharing,
+            status,
+            sizeBytes: d.file_size_bytes || 0,
+            pages: 1,
+            updatedAt: d.updated_at ? new Date(d.updated_at).toLocaleDateString() : "",
+            driveUrl: d.drive_file_id ? `https://drive.google.com/file/d/${d.drive_file_id}/view` : null,
+          }
+        })
+        setDocs(mapped)
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadDocs()
+  }, [])
+
+  async function handleDelete(id: string) {
+    await apiDelete(`/api/documents/${id}`)
+    setDocs((prev) => prev.filter((d) => d.id !== id))
+  }
+
   return (
     <Card>
       <CardHeader>
@@ -195,20 +244,22 @@ function MyDocuments() {
         <CardDescription>Documents you added to Amber</CardDescription>
       </CardHeader>
       <CardContent className="px-0">
-        {myDocuments.length === 0 ? (
+        {loading ? (
+          <div className="py-10 text-center text-sm text-muted-foreground">Loading documents...</div>
+        ) : docs.length === 0 ? (
           <EmptyState
             icon={FileText}
             title="No documents yet"
             description="Upload files or pick them from Google Drive to search them with Amber."
             action={
               <Button asChild variant="outline">
-                <Link href="/upload">Go to Upload</Link>
+                <Link href="/upload">Go to Data</Link>
               </Button>
             }
           />
         ) : (
           <ul className="divide-y divide-border/60">
-            {myDocuments.map((doc) => (
+            {docs.map((doc) => (
               <li key={doc.id} className="flex items-center gap-3 px-6 py-3">
                 <FileIcon type={doc.fileType} />
                 <div className="min-w-0 flex-1">
@@ -235,7 +286,7 @@ function MyDocuments() {
                     </Button>
                   )}
                   <EditDocumentDialog doc={doc} />
-                  <DeleteDocumentDialog title={doc.title} inDrive={doc.driveUrl !== null} />
+                  <DeleteDocumentDialog title={doc.title} inDrive={doc.driveUrl !== null} onDelete={() => handleDelete(doc.id)} />
                 </div>
               </li>
             ))}

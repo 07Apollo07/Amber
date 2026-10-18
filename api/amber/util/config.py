@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     # Origin the browser uses for both the web app and /api (same origin via the LB, or
     # the Next.js dev server's /api rewrite locally). OAuth redirects are built from it.
     public_base_url: str = "http://localhost:3000"
+    drive_sync_admin_secret: SecretStr = SecretStr("")
+    # A changed Drive file is re-indexed once no change has arrived for this long...
+    drive_reindex_quiet_seconds: int = 300
+    # ...or, if it never goes quiet, this long after its first change.
+    drive_reindex_max_wait_seconds: int = 3600
 
     # Google OAuth web client (must be the client configured for Firebase's Google provider).
     google_oauth_client_id: str = ""
@@ -33,6 +38,15 @@ class Settings(BaseSettings):
     # Existing Firebase project. The web API key is only used server-side for signInWithIdp.
     firebase_project_id: str = ""
     firebase_web_api_key: SecretStr = SecretStr("")
+
+    # Google Picker (the "Choose files from Google Drive" dialog runs in the browser).
+    # The API key is a browser key restricted to the web origin and the Picker API, so it is not secret.
+    # The project number (not the ID) is the Picker's "app ID"; it is what lets Amber read the picked files.
+    picker_api_key: str = ""
+    google_cloud_project_number: str = ""
+
+    # Gemini API Key for LLM and embeddings
+    gemini_api_key: SecretStr = SecretStr("")
 
     # Google service-account key file used by google.auth.default() (Firebase Admin, KMS).
     # Read from GOOGLE_APPLICATION_CREDENTIALS (no AMBER_ prefix), in the environment or .env.
@@ -60,9 +74,21 @@ class Settings(BaseSettings):
     # Signing out everywhere takes effect on other instances within this window.
     revocation_cache_seconds: int = 60
 
-    cookie_secure: bool = True
+    cookie_secure: bool | None = None
     session_days: int = 5
     bootstrap_admin_emails: str = ""  # comma-separated
+
+    # Agent model settings
+    agent_model_name: str = "gemini-2.5-flash"
+    litellm_base_url: str = ""
+    litellm_api_key: SecretStr = SecretStr("")
+
+    # Opal voice (Gemini Live). Talks to Google AI Studio directly, not through LiteLLM.
+    # The key falls back to gemini_api_key when unset.
+    gemini_live_api_key: SecretStr = SecretStr("")
+    gemini_live_model: str = "gemini-3.8-live"
+    gemini_live_voice: str = "Aoede"
+    gemini_live_max_session_seconds: int = 30 * 60
 
     @property
     def public_origin(self) -> str:
@@ -83,6 +109,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check(self) -> "Settings":
+        if self.cookie_secure is None:
+            self.cookie_secure = self.public_base_url.startswith("https://")
         self.trusted_networks  # noqa: B018 (fail fast on a malformed CIDR)
         if self.env != "test":
             # Fail at startup, not at the first sign-in.

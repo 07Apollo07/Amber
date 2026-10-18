@@ -13,16 +13,35 @@ export function OrganizeFields({
   onCollectionChange,
   tags,
   onTagsChange,
+  collections = [],
+  knownTags = [],
+  idPrefix = "",
+  showCollection = true,
 }: {
   collection: string
   onCollectionChange: (value: string) => void
   tags: string[]
   onTagsChange: (value: string[]) => void
+  /** The user's existing collections. */
+  collections?: string[]
+  /** Tags already used on the user's documents, offered as one-click options. */
+  knownTags?: string[]
+  /** Keeps element ids unique when this form is on the page more than once. */
+  idPrefix?: string
+  showCollection?: boolean
 }) {
-  // Existing collections and tags load from the API later; tags added here are kept for this session.
-  const collections: string[] = []
-  const [tagOptions, setTagOptions] = useState<string[]>(() => [...tags])
+  const [addedTags, setAddedTags] = useState<string[]>([])
+  const tagOptions = [...new Set([...knownTags, ...addedTags, ...tags])]
   const [draft, setDraft] = useState("")
+  const [newCollection, setNewCollection] = useState("")
+  const collectionOptions = collection !== "none" && !collections.includes(collection) ? [...collections, collection] : collections
+
+  function addCollection() {
+    const name = newCollection.trim().slice(0, 255)
+    if (!name) return
+    onCollectionChange(name)
+    setNewCollection("")
+  }
 
   function toggle(tag: string) {
     onTagsChange(tags.includes(tag) ? tags.filter((t) => t !== tag) : [...tags, tag])
@@ -31,31 +50,44 @@ export function OrganizeFields({
   function addTag() {
     const tag = draft.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 32)
     if (!tag) return
-    if (!tagOptions.includes(tag)) setTagOptions((t) => [...t, tag])
+    if (!tagOptions.includes(tag)) setAddedTags((t) => [...t, tag])
     if (!tags.includes(tag)) onTagsChange([...tags, tag])
     setDraft("")
   }
 
   return (
     <div className="space-y-4">
-      <div className="space-y-1.5">
-        <Label htmlFor="collection">Collection</Label>
+      {showCollection && <div className="space-y-1.5">
+        <Label htmlFor={`${idPrefix}collection`}>Collection</Label>
         <Select value={collection} onValueChange={onCollectionChange}>
-          <SelectTrigger id="collection" className="w-full">
+          <SelectTrigger id={`${idPrefix}collection`} className="w-full">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="none">No collection</SelectItem>
-            {collections.map((c) => (
+            {collectionOptions.map((c) => (
               <SelectItem key={c} value={c}>
                 {c}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
-      </div>
+        <Input
+          value={newCollection}
+          onChange={(event) => setNewCollection(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault()
+              addCollection()
+            }
+          }}
+          onBlur={addCollection}
+          placeholder="Or create a new collection"
+          aria-label="New collection name"
+        />
+      </div>}
       <div className="space-y-1.5">
-        <Label htmlFor="new-tag">Tags</Label>
+        <Label htmlFor={`${idPrefix}new-tag`}>Tags</Label>
         <div className="flex flex-wrap gap-1.5">
           {tagOptions.length === 0 && <p className="text-xs text-muted-foreground">No tags yet. Add one below.</p>}
           {tagOptions.map((tag) => {
@@ -78,7 +110,7 @@ export function OrganizeFields({
         </div>
         <div className="relative">
           <Input
-            id="new-tag"
+            id={`${idPrefix}new-tag`}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
