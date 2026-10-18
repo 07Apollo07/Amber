@@ -92,3 +92,11 @@ def test_endpoint_needs_configuration():
         assert exc.value.status_code == 503
     finally:
         drive_api.get_settings = original
+
+
+def test_drive_credentials_can_be_narrowed(monkeypatch, settings):
+    """The agent asks for drive.file only, so a drive.readonly grant never lets it browse the whole Drive."""
+    monkeypatch.setattr(drive, "get_settings", lambda: settings)
+    monkeypatch.setattr(drive.repository, "get_token", lambda *_: {"encrypted_refresh_token": b"e", "scopes": ""})
+    monkeypatch.setattr(drive, "decrypt_token", lambda *_args, **_kwargs: "refresh-token")
+    assert drive.get_drive_credentials("user-id", object(), scopes=[DRIVE_SCOPE]).scopes == [DRIVE_SCOPE]

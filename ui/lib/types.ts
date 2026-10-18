@@ -181,6 +181,7 @@ export type SessionUser = {
   drive: {
     connected: boolean
     can_share: boolean
+    can_import_folders?: boolean
     scopes: string[]
     permission_sync?: { active: boolean; expires_at: string | null; warning: string | null }
   }
