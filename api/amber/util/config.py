@@ -83,6 +83,13 @@ class Settings(BaseSettings):
     litellm_base_url: str = ""
     litellm_api_key: SecretStr = SecretStr("")
 
+    # Opal voice (Gemini Live). Talks to Google AI Studio directly, not through LiteLLM.
+    # The key falls back to gemini_api_key when unset.
+    gemini_live_api_key: SecretStr = SecretStr("")
+    gemini_live_model: str = "gemini-3.8-live"
+    gemini_live_voice: str = "Aoede"
+    gemini_live_max_session_seconds: int = 30 * 60
+
     @property
     def public_origin(self) -> str:
         parts = urlsplit(self.public_base_url)
