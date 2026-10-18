@@ -77,14 +77,18 @@ AMBER_PICKER_API_KEY: "${PICKER_API_KEY:-}"
 AMBER_GOOGLE_CLOUD_PROJECT_NUMBER: "$PROJECT_NUMBER"
 AMBER_AGENT_MODEL_NAME: "${AGENT_MODEL_NAME:-gemini-2.5-flash}"
 AMBER_LITELLM_BASE_URL: "${LITELLM_BASE_URL:-}"
+AMBER_GEMINI_LIVE_MODEL: "${GEMINI_LIVE_MODEL:-gemini-3.8-live}"
+AMBER_GEMINI_LIVE_MAX_SESSION_SECONDS: "${GEMINI_LIVE_MAX_SESSION_SECONDS:-1800}"
 YAML
+  # --timeout 3600 on both services: Opal voice sessions are WebSockets (browser -> web -> api), and
+  # Cloud Run closes a WebSocket at the request timeout. Keep it above GEMINI_LIVE_MAX_SESSION_SECONDS.
   gcloud run deploy amber-api --image "$REPO/api:$tag" --region "$REGION" --service-account "$API_SA" \
     --allow-unauthenticated --ingress all --add-cloudsql-instances "$PROJECT_ID:$REGION:$SQL_INSTANCE" \
-    --memory 1Gi --cpu 1 --timeout 300 --concurrency 10 --min-instances 0 --max-instances 3 --port 8000 \
+    --memory 1Gi --cpu 1 --timeout 3600 --concurrency 10 --min-instances 0 --max-instances 3 --port 8000 \
     --env-vars-file "$envfile" \
     --set-secrets "AMBER_GOOGLE_OAUTH_CLIENT_SECRET=amber-oauth-client-secret:latest,AMBER_FIREBASE_WEB_API_KEY=amber-firebase-web-api-key:latest,AMBER_GEMINI_API_KEY=amber-gemini-api-key:latest,AMBER_STATE_COOKIE_KEY=amber-state-cookie-key:latest,AMBER_DATABASE_DSN=amber-database-dsn:latest,AMBER_LITELLM_API_KEY=amber-litellm-api-key:latest,AMBER_DRIVE_SYNC_ADMIN_SECRET=amber-drive-sync-secret:latest"
   gcloud run deploy amber-web --image "$REPO/web:$tag" --region "$REGION" --service-account "$WEB_SA" \
-    --allow-unauthenticated --memory 512Mi --min-instances 0 --max-instances 3 --port 3000 \
+    --allow-unauthenticated --memory 512Mi --timeout 3600 --min-instances 0 --max-instances 3 --port 3000 \
     --set-env-vars "AMBER_API_ORIGIN=$API_URL"
   echo "Open $WEB_URL"
 }

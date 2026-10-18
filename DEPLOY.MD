@@ -202,7 +202,7 @@ gcloud run deploy amber-api \
   --region $REGION --service-account amber-api@$PROJECT_ID.iam.gserviceaccount.com \
   --allow-unauthenticated --ingress all \
   --add-cloudsql-instances $PROJECT_ID:$REGION:<instance> \
-  --memory 1Gi --cpu 1 --timeout 300 --concurrency 10 \
+  --memory 1Gi --cpu 1 --timeout 3600 --concurrency 10 \
   --min-instances 0 --max-instances 3 \
   --set-env-vars AMBER_ENV=prod,AMBER_PUBLIC_BASE_URL=...,... \
   --set-secrets AMBER_GOOGLE_OAUTH_CLIENT_SECRET=amber-oauth-client-secret:latest,...
@@ -211,11 +211,11 @@ gcloud run deploy amber-api \
 gcloud run deploy amber-web \
   --image $REGION-docker.pkg.dev/$PROJECT_ID/amber/web:$GIT_SHA \
   --region $REGION --service-account amber-web@$PROJECT_ID.iam.gserviceaccount.com \
-  --allow-unauthenticated --memory 512Mi --min-instances 0 --max-instances 3 \
+  --allow-unauthenticated --memory 512Mi --timeout 3600 --min-instances 0 --max-instances 3 \
   --set-env-vars AMBER_API_ORIGIN=https://<amber-api run.app URL>
 ```
 
-Order: build both, deploy the API, read its URL, deploy the web app with that URL, then confirm the web URL matches `AMBER_PUBLIC_BASE_URL` and the registered redirect URI. Memory is 1 GiB with a 30 MB limit; raise it only if large files fail.
+Order: build both, deploy the API, read its URL, deploy the web app with that URL, then confirm the web URL matches `AMBER_PUBLIC_BASE_URL` and the registered redirect URI. Memory is 1 GiB with a 30 MB limit; raise it only if large files fail. Both services use `--timeout 3600` because Opal voice sessions are WebSockets (browser → web → api) and Cloud Run closes a WebSocket at the request timeout. Opal talks to Gemini Live directly (not LiteLLM) with the `amber-gemini-api-key` secret and `AMBER_GEMINI_LIVE_MODEL`. An open voice session holds one of an instance's 10 concurrent slots and keeps that instance billed while it is open.
 
 ---
 
