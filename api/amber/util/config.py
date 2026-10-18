@@ -82,7 +82,13 @@ class Settings(BaseSettings):
     agent_model_name: str = "gemini-2.5-flash"
     litellm_base_url: str = ""
     litellm_api_key: SecretStr = SecretStr("")
-    agent_live_model_name: str = "gemini-3.8-live"
+
+    # Opal voice (Gemini Live). Talks to Google AI Studio directly, not through LiteLLM.
+    # The key falls back to gemini_api_key when unset.
+    gemini_live_api_key: SecretStr = SecretStr("")
+    gemini_live_model: str = "gemini-3.8-live"
+    gemini_live_voice: str = "Aoede"
+    gemini_live_max_session_seconds: int = 30 * 60
 
     @property
     def public_origin(self) -> str:

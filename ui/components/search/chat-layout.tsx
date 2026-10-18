@@ -389,15 +389,26 @@ export function ChatLayout() {
   const [sidekickOpen, setSidekickOpen] = useState(false)
   const skipNextLoadRef = useRef<string | null>(null)
   const taskPlanActiveRef = useRef(false)
+  // Bumped only when the user switches chats, so a new chat getting its thread id doesn't end the voice session.
+  const [sidekickSession, setSidekickSession] = useState(0)
   const sidekickContext = useMemo(() => {
     const recentMessages = entries
-      .filter((entry): entry is TextEntry => entry.kind === "text")
-      .slice(-12)
-      .map((entry) => `${entry.role === "user" ? "User" : "Amber"}: ${entry.text}`)
+      .flatMap((entry) => {
+        if (entry.kind === "text") {
+          const text = entry.text.length > 1500 ? `${entry.text.slice(0, 1500)}…` : entry.text
+          return [`${entry.role === "user" ? "User" : "Amber"}: ${text}`]
+        }
+        if (entry.kind === "tool") return [`[Amber used ${entry.name}: ${entry.status}]`]
+        return []
+      })
+      .slice(-16)
       .join("\n")
     const taskSummary = tasks.map((task) => `${task.title} (${task.status})`).join("\n")
+    const collection = collections.find((item) => item.id === selectedCollectionId)
     return [
       `Active conversation: ${activeId || "new conversation"}`,
+      `Searching: ${collection ? `the "${collection.name}" collection` : "all of the user's documents"}`,
+      loading && "Amber is still working on its latest reply.",
       recentMessages && `Recent conversation:\n${recentMessages}`,
       taskSummary && `Current tasks:\n${taskSummary}`,
       approval && `Approval awaiting the user's decision: ${approval.title}`,
@@ -405,7 +416,7 @@ export function ChatLayout() {
       .filter(Boolean)
       .join("\n\n")
       .slice(-8000)
-  }, [activeId, approval, entries, tasks])
+  }, [activeId, approval, collections, entries, loading, selectedCollectionId, tasks])
 
   async function fetchConversations(): Promise<ConversationRecord[]> {
     const response = await fetch("/api/agent/conversations")
@@ -850,6 +861,7 @@ export function ChatLayout() {
 
   function newChat() {
     skipNextLoadRef.current = null
+    setSidekickSession((value) => value + 1)
     setActiveId(null)
     setEntries([])
     taskPlanActiveRef.current = false
@@ -861,6 +873,7 @@ export function ChatLayout() {
   function selectConversation(id: string) {
     if (id === activeId) return
     skipNextLoadRef.current = null
+    setSidekickSession((value) => value + 1)
     setEntries([])
     taskPlanActiveRef.current = false
     setTasks([])
@@ -1394,7 +1407,7 @@ export function ChatLayout() {
             </Button>
           </div>
           <LiveSidekick
-            key={activeId ?? "new-chat"}
+            key={sidekickSession}
             context={sidekickContext}
             draft={draft}
             onDraftChange={setDraft}
