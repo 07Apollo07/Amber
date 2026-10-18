@@ -3,7 +3,13 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from amber.api.auth import safe_return_to
-from amber.models import DRIVE_SCOPE, can_manage_drive_sharing, drive_connected
+from amber.models import (
+    DRIVE_READONLY_SCOPE,
+    DRIVE_SCOPE,
+    can_import_folders,
+    can_manage_drive_sharing,
+    drive_connected,
+)
 from tests.conftest import BASE_URL, start
 
 
@@ -15,7 +21,7 @@ def test_start_redirects_to_google_with_pkce_and_drive_scope(client):
     assert params["access_type"] == "offline"
     assert params["prompt"] == "select_account"
     assert params["redirect_uri"] == f"{BASE_URL}/api/auth/google/callback"
-    assert set(params["scope"].split()) == {"openid", "email", "profile", DRIVE_SCOPE}
+    assert set(params["scope"].split()) == {"openid", "email", "profile", DRIVE_SCOPE, DRIVE_READONLY_SCOPE}
     assert params["state"] and params["nonce"] and params["state"] != params["nonce"]
 
 
@@ -59,10 +65,24 @@ def test_drive_connected_needs_token_and_scope(has_token, scopes, expected):
     assert drive_connected(has_token, scopes) is expected
 
 
-def test_requested_scope_is_not_restricted():
+def test_drive_scopes():
     assert DRIVE_SCOPE.endswith("/drive.file")
+    assert DRIVE_READONLY_SCOPE.endswith("/drive.readonly")
     assert can_manage_drive_sharing(DRIVE_SCOPE)
     assert not can_manage_drive_sharing("openid email")
+
+
+@pytest.mark.parametrize(
+    ("scopes", "expected"),
+    [
+        (f"openid {DRIVE_SCOPE} {DRIVE_READONLY_SCOPE}", True),
+        ("openid https://www.googleapis.com/auth/drive", True),  # legacy full scope can list folders too
+        (f"openid {DRIVE_SCOPE}", False),
+        ("", False),
+    ],
+)
+def test_folder_import_needs_drive_readonly(scopes, expected):
+    assert can_import_folders(scopes) is expected
 
 
 def test_api_security_headers(client):

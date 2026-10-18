@@ -10,7 +10,7 @@ import httpx
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 
-from amber.models import DRIVE_SCOPE
+from amber.models import DRIVE_READONLY_SCOPE, DRIVE_SCOPE
 from amber.util.config import Settings
 
 AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -19,7 +19,7 @@ REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
 
 # Sign-in and the Drive permission are requested together, on one consent screen.
-SCOPES = ["openid", "email", "profile", DRIVE_SCOPE]
+SCOPES = ["openid", "email", "profile", DRIVE_SCOPE, DRIVE_READONLY_SCOPE]
 
 
 class RevokeFailed(Exception):

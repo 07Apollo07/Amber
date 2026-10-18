@@ -34,7 +34,9 @@ GOOGLE_EXPORTS: dict[str, tuple[str, str, str]] = {
 }
 
 
-def get_drive_credentials(user_id: Any, conn: Any) -> Credentials | None:
+def get_drive_credentials(user_id: Any, conn: Any, scopes: list[str] | None = None) -> Credentials | None:
+    """The user's Drive credentials. `scopes` narrows the access token below the stored grant, for callers that
+    must not use drive.readonly (the agent's workspace tools)."""
     settings = get_settings()
     token_row = repository.get_token(conn, user_id)
     if not token_row:
@@ -56,6 +58,7 @@ def get_drive_credentials(user_id: Any, conn: Any) -> Credentials | None:
         token_uri="https://oauth2.googleapis.com/token",
         client_id=client_id,
         client_secret=client_secret,
+        scopes=scopes,
     )
 
 
@@ -92,8 +95,8 @@ def mint_picker_token(user_id: Any, conn: Any) -> tuple[str, int]:
     return narrowed.token, max(seconds, 60)
 
 
-def build_drive_service(user_id: Any, conn: Any) -> Any | None:
-    creds = get_drive_credentials(user_id, conn)
+def build_drive_service(user_id: Any, conn: Any, scopes: list[str] | None = None) -> Any | None:
+    creds = get_drive_credentials(user_id, conn, scopes)
     if not creds:
         return None
     return build("drive", "v3", credentials=creds, cache_discovery=False)
@@ -137,6 +140,63 @@ def upload_file_to_drive(
         .execute()
     )
     return file
+
+
+FOLDER_MIME = "application/vnd.google-apps.folder"
+
+IMPORTABLE_FILE_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+def is_importable(mime_type: str) -> bool:
+    """Whether Amber can index a Drive file of this type: Docs, Sheets, Slides, and files the parser reads."""
+    if mime_type in GOOGLE_EXPORTS:
+        return True
+    if mime_type.startswith("application/vnd.google-apps."):
+        return False  # Forms, Drawings, Sites, shortcuts and so on have nothing to index
+    return mime_type in IMPORTABLE_FILE_TYPES or mime_type.startswith("text/")
+
+
+def list_folder_files(drive_service: Any, folder_id: str, limit: int) -> tuple[list[dict[str, Any]], bool]:
+    """Every file under a folder, subfolders included, breadth first, up to `limit` files.
+
+    Returns (files as {id, name, mimeType}, truncated). Folders reached twice (Drive allows several parents) are
+    listed once. Needs drive.readonly: under drive.file Google returns only files Amber already has."""
+    files: list[dict[str, Any]] = []
+    pending, seen = [folder_id], {folder_id}
+    while pending:
+        parent = pending.pop(0)
+        page_token = None
+        while True:
+            response = (
+                drive_service.files()
+                .list(
+                    q=f"'{parent}' in parents and trashed = false",
+                    fields="nextPageToken, files(id, name, mimeType)",
+                    pageSize=1000,
+                    pageToken=page_token,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                )
+                .execute()
+            )
+            for item in response.get("files", []):
+                if item.get("mimeType") == FOLDER_MIME:
+                    if item["id"] not in seen:
+                        seen.add(item["id"])
+                        pending.append(item["id"])
+                    continue
+                if len(files) >= limit:
+                    return files, True
+                files.append(item)
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+    return files, False
 
 
 class UnsupportedDriveFile(Exception):

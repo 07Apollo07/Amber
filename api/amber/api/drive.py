@@ -3,15 +3,17 @@
 import hashlib
 import hmac
 import logging
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from amber import repository
 from amber.api.documents import apply_organization
 from amber.ingest import settings as indexing_settings
 from amber.ingest.pipeline import IndexingError, index_document_content, mark_document_failed
+from amber.models import can_import_folders
 from amber.util import drive, drive_sync
 from amber.util.config import get_settings
 from amber.util.ratelimit import limit
@@ -23,6 +25,10 @@ _picker_limit = Depends(limit("drive.picker", max_hits=30, window_seconds=60))
 _webhook_limit = Depends(limit("drive.webhook", max_hits=300, window_seconds=60))
 
 router = APIRouter(prefix="/api/drive", tags=["drive"])
+
+# Most files one folder request lists. The browser imports them in small batches, so this bounds a single action.
+MAX_FOLDER_FILES = 500
+_DRIVE_ID = re.compile(r"^[A-Za-z0-9_-]{1,200}$")  # also keeps the id safe inside a Drive query string
 
 
 class DriveImportRequest(BaseModel):
@@ -48,6 +54,45 @@ def picker_token(user: CurrentUser, conn: DbDep) -> dict[str, Any]:
         "developer_key": settings.picker_api_key,
         "app_id": settings.google_cloud_project_number,
     }
+
+
+class DriveFolderRequest(BaseModel):
+    folder_ids: list[str] = Field(min_length=1, max_length=50)
+
+
+@router.post("/folder-files", dependencies=[CsrfProtected, _picker_limit])
+def list_folder_files(user: CurrentUser, conn: DbDep, req: DriveFolderRequest) -> dict[str, Any]:
+    """The importable files under folders the user picked, subfolders included. The browser then sends them to
+    /import in batches, so a large folder never has to fit in one request."""
+    token = repository.get_token(conn, user["id"])
+    if not token or not can_import_folders(token["scopes"]):
+        raise HTTPException(status_code=409, detail="Reconnect Google Drive to import whole folders.")
+    drive_service = drive.build_drive_service(user["id"], conn)
+    if not drive_service:
+        raise HTTPException(status_code=400, detail="Google Drive is not connected for this user")
+
+    files: list[dict[str, str]] = []
+    skipped: list[str] = []
+    seen: set[str] = set()
+    truncated = False
+    for folder_id in req.folder_ids:
+        if not _DRIVE_ID.match(folder_id):
+            raise HTTPException(status_code=422, detail="Invalid Google Drive folder id")
+        try:
+            found, cut = drive.list_folder_files(drive_service, folder_id, MAX_FOLDER_FILES - len(files))
+        except Exception as exc:
+            log.warning("Listing Drive folder %s failed: %s: %s", folder_id, type(exc).__name__, exc)
+            raise HTTPException(status_code=502, detail="Couldn't list that Google Drive folder. Try again.") from exc
+        truncated = truncated or cut
+        for item in found:
+            if item["id"] in seen:
+                continue
+            seen.add(item["id"])
+            if drive.is_importable(item.get("mimeType", "")):
+                files.append({"id": item["id"], "name": item.get("name", "Untitled")})
+            else:
+                skipped.append(item.get("name", "Untitled"))
+    return {"files": files, "skipped": skipped, "truncated": truncated, "limit": MAX_FOLDER_FILES}
 
 
 @router.post("/import", dependencies=[CsrfProtected])
@@ -77,18 +122,10 @@ def import_drive_files(
                 downloaded = drive.download_file(drive_service, file_id, max_bytes)
             except drive.UnsupportedDriveFile as unsupported:
                 skipped.append(str(unsupported))  # Forms, Drawings, Sites and so on have nothing to index
+                continue
+            title = downloaded["title"]
 
-            # Get file metadata
-            file_meta = (
-                drive_service.files()
-                .get(
-                    fileId=file_id,
-                    fields="id, name, mimeType, size, webViewLink, driveId, owners(displayName, emailAddress)",
-                )
-                .execute()
-            )
-            filename = file_meta.get("name", "Untitled")
-            mime_type = file_meta.get("mimeType", "application/octet-stream")
+            file_meta = drive_service.files().get(fileId=file_id, fields="owners(displayName, emailAddress)").execute()
             drive_owner = (file_meta.get("owners") or [None])[0] or {}
             drive_owner_email = (drive_owner.get("emailAddress") or "").lower()
             drive_owner_name = drive_owner.get("displayName")
@@ -96,24 +133,7 @@ def import_drive_files(
                 raise ValueError("Google Drive didn't provide this file's owner, so Amber can't index it safely.")
 
             repository.set_drive_sync_context(conn)
-            # Google Docs, Sheets and Slides are exported to Word, Excel and PowerPoint so they parse like uploads.
-            # `title` is what the user sees; `parse_name` tells the parser which format the bytes are.
-            title = filename
-            parse_name = filename
-            file_type = filename.rsplit(".", 1)[-1].lower() if "." in filename else "unknown"
-            if mime_type in drive.GOOGLE_EXPORTS:
-                file_type, mime_type, extension = drive.GOOGLE_EXPORTS[mime_type]
-                parse_name = filename + extension
-                request_obj = drive_service.files().export_media(fileId=file_id, mimeType=mime_type)
-            elif mime_type.startswith("application/vnd.google-apps."):
-                skipped.append(filename)  # Forms, Drawings, Sites and so on have nothing to index
-                continue
-            else:
-                request_obj = drive_service.files().get_media(fileId=file_id)
-
-            file_bytes = request_obj.execute()
-
-            title = downloaded["title"]
+            # download_file exports Docs, Sheets and Slides to Office formats so they parse like uploads.
             file_type = downloaded["file_type"]
             mime_type = downloaded["mime_type"]
             parse_name = downloaded["parse_name"]

@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter
 
 from amber import repository
-from amber.models import can_manage_drive_sharing, drive_connected
+from amber.models import can_import_folders, can_manage_drive_sharing, drive_connected
 from amber.util import drive_sync
 from amber.util.security import CurrentUser, DbDep, SettingsDep
 
@@ -36,6 +36,7 @@ def me(user: CurrentUser, conn: DbDep, settings: SettingsDep) -> dict[str, Any]:
         "drive": {
             "connected": drive_connected(token is not None, scopes),
             "can_share": can_manage_drive_sharing(scopes),
+            "can_import_folders": can_import_folders(scopes),
             "scopes": sorted(set(scopes.split())),
             "permission_sync": {
                 "active": bool(sync_state and sync_state["channel_expires"] > datetime.now(UTC)),

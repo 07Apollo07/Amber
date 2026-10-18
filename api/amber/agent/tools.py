@@ -24,6 +24,7 @@ from amber import repository
 from amber.ingest import settings as indexing_settings
 from amber.ingest.embedder import generate_embeddings
 from amber.ingest.parser import parse_document
+from amber.models import DRIVE_SCOPE
 from amber.util import drive
 from amber.util.config import get_settings
 from amber.util.db import connect
@@ -1359,7 +1360,8 @@ def get_file(
 def _drive_services(user_id: str) -> tuple[object, object, object]:
     settings = get_settings()
     with connect(settings) as conn:
-        credentials = drive.get_drive_credentials(uuid.UUID(user_id), conn)
+        # drive.file only: the user's drive.readonly grant is for folder import, not for the agent to browse Drive.
+        credentials = drive.get_drive_credentials(uuid.UUID(user_id), conn, scopes=[DRIVE_SCOPE])
     if credentials is None:
         raise ValueError("Connect Google Drive before using the document workspace.")
     return (
@@ -1681,7 +1683,7 @@ def apply_google_doc_updates(
 def _drive_service(user_id: str) -> object:
     settings = get_settings()
     with connect(settings) as conn:
-        credentials = drive.get_drive_credentials(uuid.UUID(user_id), conn)
+        credentials = drive.get_drive_credentials(uuid.UUID(user_id), conn, scopes=[DRIVE_SCOPE])  # see _drive_services
     if credentials is None:
         raise ValueError("Connect Google Drive before using workspace file tools.")
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
