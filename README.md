@@ -8,7 +8,7 @@ Its core rule is that **a result never includes a document the user isn't allowe
 
 **Live:** [amber.kathalyst.ai](https://amber.kathalyst.ai)
 
-**Demo video:** _coming soon_ <!-- TODO: replace with the demo video link or embed -->
+**Demo video:** [YouTube](https://dub.kathalyst.ai/amber-video)
 
 ---
 
