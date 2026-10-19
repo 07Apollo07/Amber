@@ -142,6 +142,7 @@ def get_agent_model(settings=None, model_name: str | None = None):
         model=model_name or settings.agent_model_name,
         temperature=0.2,
         streaming=True,
+        stream_usage=True,  # token counts for the admin query trace
         api_key=api_key,
     )
 
@@ -188,7 +189,7 @@ def create_agent_graph(checkpointer=None, settings=None, workspace_writes_enable
     model = get_agent_model(settings).bind_tools(tools)
 
     def call_model(state: AgentState, config: RunnableConfig):
-        print(f"[AGENT_GRAPH] call_model received messages: {state['messages']}")
+        log.debug("call_model: %d messages in context", len(state["messages"]))
         from langgraph.config import get_stream_writer
 
         get_stream_writer()(
@@ -293,7 +294,7 @@ def create_agent_graph(checkpointer=None, settings=None, workspace_writes_enable
                 "status": "completed" if not response.tool_calls else "pending",
             }
         )
-        print(f"[AGENT_GRAPH] call_model generated response: {response}")
+        log.debug("call_model: %d tool calls requested", len(response.tool_calls or []))
         return {"messages": [response]}
 
     workflow = StateGraph(AgentState)

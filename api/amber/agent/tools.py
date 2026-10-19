@@ -21,6 +21,7 @@ from langgraph.prebuilt import InjectedState
 from langgraph.types import Command, interrupt
 
 from amber import repository
+from amber.agent import settings as agent_settings
 from amber.ingest import settings as indexing_settings
 from amber.ingest.embedder import generate_embeddings
 from amber.ingest.parser import parse_document
@@ -420,20 +421,20 @@ def render_source_cards(
     )
 
 
-@tool
+@tool(response_format="content_and_artifact")
 def vector_search(
     query: str,
     user_email: Annotated[str, InjectedState("user_email")],
     user_domain: Annotated[str | None, InjectedState("user_domain")],
     collection_id: Annotated[str | None, InjectedState("collection_id")],
-) -> str:
+) -> tuple[str, dict]:
     """Search internal documents using hybrid vector cosine distance and full-text search."""
     _emit_task("find-files", "Find relevant files", "in_progress")
     settings = get_settings()
     embeddings = generate_embeddings([query])
     if not embeddings:
         _emit_task("find-files", "Find relevant files", "failed")
-        return "No internal embeddings generated."
+        return "No internal embeddings generated.", {"sources": []}
 
     with connect(settings) as conn:
         results = repository.hybrid_search_chunks(
@@ -442,15 +443,28 @@ def vector_search(
             user_domain=user_domain,
             query_embedding=embeddings[0],
             query_text=query,
-            limit=5,
+            limit=agent_settings.load_chat(conn).passages_per_search,
             collection_ids=[uuid.UUID(collection_id)] if collection_id else None,
         )
 
     if not results:
         _emit_task("find-files", "Find relevant files", "completed")
-        return "No relevant internal documents found."
+        return "No relevant internal documents found.", {"sources": []}
 
     formatted = []
+    # Metadata and scores only: the admin query trace records which sources were used, never their text.
+    sources = [
+        {
+            "document_id": str(r.get("document_id")),
+            "title": r.get("document_title"),
+            "file_type": r.get("file_type"),
+            "page": r.get("page"),
+            "origin": r.get("document_source"),
+            "vector_distance": float(r["vector_distance"]) if r.get("vector_distance") is not None else None,
+            "text_rank": float(r["text_rank"]) if r.get("text_rank") is not None else None,
+        }
+        for r in results
+    ]
     for r in results:
         content = r.get("content", "")
         doc_id = r.get("document_id", "unknown")
@@ -469,7 +483,7 @@ def vector_search(
 
         formatted.append(f"{source_header}\n{content}")
     _emit_task("find-files", "Find relevant files", "completed")
-    return "\n\n".join(formatted)
+    return "\n\n".join(formatted), {"sources": sources}
 
 
 @tool
@@ -2541,6 +2555,13 @@ def _column_number(column: str) -> int:
 def web_search(query: str) -> str:
     """Search the web using the self-hosted SearXNG instance."""
     settings = get_settings()
+    with connect(settings) as conn:
+        enabled = agent_settings.load_chat(conn).web_search_enabled
+    if not enabled:
+        return (
+            "Web search is turned off by this workspace's Amber administrator. Answer from internal sources, "
+            "and tell the user web search is unavailable if they need external information."
+        )
     searxng_url = getattr(settings, "searxng_url", "http://localhost:8080")
 
     try:

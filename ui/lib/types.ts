@@ -110,15 +110,6 @@ export type Conversation = {
   updatedAt: string
 }
 
-export type AuditEvent = {
-  id: string
-  at: string
-  actor: string
-  action: string
-  target: string
-  detail: string
-}
-
 export type UploadRow = {
   /** The document id once it exists on the server; a temporary id while the upload is in flight. */
   id: string
@@ -162,12 +153,6 @@ export type SearchHistoryItem = {
   id: string
   query: string
   at: string
-}
-
-export type QueryTraceRow = Trace & {
-  user: string
-  at: string
-  feedback: "up" | "down" | null
 }
 
 /** The signed-in user, as returned by GET /api/me. */

@@ -53,20 +53,26 @@ def test_litellm_models_are_loaded_from_proxy_and_cached(monkeypatch: pytest.Mon
     assert requests == [("https://litellm.example/v1/models", {"Authorization": "Bearer proxy-key"})]
 
 
-def test_agent_live_config_exposes_only_the_configured_model() -> None:
+@pytest.fixture
+def default_agent_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agent_api.agent_settings, "load_voice", lambda _conn: agent_api.agent_settings.VoiceSettings())
+    monkeypatch.setattr(agent_api.agent_settings, "load_chat", lambda _conn: agent_api.agent_settings.ChatSettings())
+
+
+def test_agent_live_config_exposes_only_the_configured_model(default_agent_settings) -> None:
     settings = Settings(env="test", gemini_live_api_key=SecretStr("live-key"), gemini_live_model="gemini-live")
 
-    config = asyncio.run(agent_api.get_live_config({"id": "user-id"}, settings))
+    config = agent_api.get_live_config({"id": "user-id"}, settings, None)
 
     assert config == {"enabled": True, "model": "gemini-live"}
 
 
-def test_agent_live_key_falls_back_to_gemini_key_and_is_disabled_without_one() -> None:
+def test_agent_live_key_falls_back_to_gemini_key_and_is_disabled_without_one(default_agent_settings) -> None:
     fallback = Settings(env="test", gemini_api_key=SecretStr("shared-key"), gemini_live_api_key=SecretStr(""))
     assert agent_api._live_api_key(fallback) == "shared-key"
 
     missing = Settings(env="test", gemini_api_key=SecretStr(""), gemini_live_api_key=SecretStr(""))
-    assert asyncio.run(agent_api.get_live_config({"id": "user-id"}, missing)) == {"enabled": False, "model": None}
+    assert agent_api.get_live_config({"id": "user-id"}, missing, None) == {"enabled": False, "model": None}
 
 
 def test_agent_live_config_puts_chat_context_in_the_server_owned_prompt() -> None:
@@ -233,6 +239,11 @@ def test_vector_search_passes_selected_collection_to_retrieval(monkeypatch: pyte
     monkeypatch.setattr(agent_tools, "get_settings", lambda: object())
     monkeypatch.setattr(agent_tools, "generate_embeddings", lambda _texts: [[0.1]])
     monkeypatch.setattr(agent_tools, "connect", lambda _settings: nullcontext(object()))
+    monkeypatch.setattr(
+        agent_tools.agent_settings,
+        "load_chat",
+        lambda _conn: agent_tools.agent_settings.ChatSettings(passages_per_search=7),
+    )
 
     def fake_search(_conn, **kwargs):
         search_args.update(kwargs)
@@ -247,8 +258,9 @@ def test_vector_search_passes_selected_collection_to_retrieval(monkeypatch: pyte
         str(collection_id),
     )
 
-    assert result == "No relevant internal documents found."
+    assert result == ("No relevant internal documents found.", {"sources": []})
     assert search_args["collection_ids"] == [collection_id]
+    assert search_args["limit"] == 7
 
 
 def test_agent_chat_unauthenticated(client: TestClient) -> None:
