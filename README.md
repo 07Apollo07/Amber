@@ -180,6 +180,6 @@ Contributions are welcome. Open an issue to discuss a bigger change first, keep 
 
 ## License
 
-_License to be added._ <!-- TODO: add a LICENSE file and name it here -->
+Licensed under the [Apache License, Version 2.0](LICENSE).
 
-Built by [Kathalyst](https://kathalyst.ai).
+Built by [Anushka Singh](https://www.linkedin.com/in/asingh27) and [Justin Dsouza](https://www.linkedin.com/in/justin-dsouza07/).
