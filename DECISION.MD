@@ -68,11 +68,11 @@ This file records the main design decisions behind Amber: what we chose, why, an
 | Role | Purpose | Rights |
 |---|---|---|
 | `amber_migrator` | Owns the schema; applies `schema.sql` by hand | DDL |
-| `amber_app` | The API at runtime | Data changes on app tables only; **`INSERT` only on `audit_log`**; RLS enforced; no `BYPASSRLS` |
+| `amber_app` | The API at runtime | Data changes on app tables only; **`INSERT` and `SELECT` only on `audit_log`** (no `UPDATE`/`DELETE`); RLS enforced; no `BYPASSRLS` |
 
 **Why.**
 - If the API is compromised, it can't drop tables, change the schema, turn off RLS or rewrite history.
-- **The audit log is append-only by construction.** `amber_app` has `INSERT` on `audit_log` but no `SELECT`, `UPDATE` or `DELETE`, so even a compromised API can't erase its tracks.
+- **The audit log is append-only by construction.** `amber_app` has `INSERT` and `SELECT` on `audit_log` but no `UPDATE` or `DELETE`, so even a compromised API can't erase its tracks. `SELECT` was added so admins can read the log in the admin portal (Audit log tab); the trade-off is that a compromised API could also read it.
 - **RLS only applies to roles that don't own the table.** Splitting the owner (`amber_migrator`) from the runtime role (`amber_app`) is what makes the RLS policies in §2 actually take effect.
 
 **Supporting choices.**
@@ -221,7 +221,7 @@ This file records the main design decisions behind Amber: what we chose, why, an
 - **Hybrid search.** Vector distance is combined with Postgres full-text search (`tsvector`, `ts_rank_cd`), so exact terms such as names, IDs and codes are found as well as similar meaning.
 - **Models.** Gemini through the Google AI API on the **paid tier**, so prompts and documents aren't used for training. Answers use `gemini-2.5-flash` by default; embeddings use `gemini-embedding-001` at 1536 dimensions.
 - **Swappable model provider.** An optional LiteLLM endpoint lets the chat use other models. The requested model is validated against LiteLLM's model list.
-- **Traceability.** Query, rewritten query, retrieved and cited chunks, model, tokens and latency are recorded in `query_traces`, so every answer can be explained and audited.
+- **Traceability.** Every chat turn is recorded in `query_traces`: the question, each tool the agent ran (shortened inputs, outcome, timing), the sources found (document metadata and match scores), model, tokens and latency. Passage text and Amber's answer are never stored, so the admin Query traces tab explains an answer without becoming a way to read other people's documents.
 - **Ingestion.** Content is checked by type and size (admin-configurable limit, 30 MB today). Google Docs, Sheets and Slides are exported to Office formats so they parse like uploads. Desktop uploads are saved to the uploader's Drive (`Amber Uploads` folder), so Drive becomes the file's home and the source of its sharing.
 
 ---

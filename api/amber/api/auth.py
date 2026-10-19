@@ -279,7 +279,6 @@ def google_callback(
         except Exception as exc:
             log.warning("Could not start Drive change notifications for user %s: %s", user["id"], exc)
 
-    print("SUCCESS: redirecting to return_to:", pending["return_to"])
     response = _same_site_redirect(pending["return_to"])
     set_session_cookies(response, settings, session_cookie)
     _clear_state(response, settings)

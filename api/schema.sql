@@ -400,3 +400,31 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS drive_owner_name varchar(255);
 UPDATE documents SET imported_by_user_id = owner_id WHERE imported_by_user_id IS NULL;
 
 COMMIT;
+
+-- Admin portal: chat query traces and a readable audit log.
+-- A trace is one chat turn: the question, each tool the agent ran, source metadata and scores (never passage
+-- text or the answer), tokens, latency and outcome.
+ALTER TABLE query_traces ADD COLUMN IF NOT EXISTS conversation_id uuid REFERENCES conversations (id) ON DELETE SET NULL;
+ALTER TABLE query_traces ADD COLUMN IF NOT EXISTS kind varchar(16) NOT NULL DEFAULT 'chat';
+ALTER TABLE query_traces ADD COLUMN IF NOT EXISTS status varchar(24) NOT NULL DEFAULT 'completed';
+ALTER TABLE query_traces ADD COLUMN IF NOT EXISTS steps jsonb;
+ALTER TABLE query_traces ADD COLUMN IF NOT EXISTS prompt_tokens integer;
+ALTER TABLE query_traces ADD COLUMN IF NOT EXISTS completion_tokens integer;
+ALTER TABLE query_traces ADD COLUMN IF NOT EXISTS error text;
+DO $$
+BEGIN
+  ALTER TABLE query_traces ADD CONSTRAINT ck_query_traces_kind CHECK (kind IN ('chat', 'approval'));
+  ALTER TABLE query_traces ADD CONSTRAINT ck_query_traces_status
+    CHECK (status IN ('completed', 'failed', 'awaiting_approval'));
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+CREATE INDEX IF NOT EXISTS ix_query_traces_conversation_id ON query_traces (conversation_id);
+CREATE INDEX IF NOT EXISTS ix_query_traces_created_at_id ON query_traces (created_at DESC, id DESC);
+
+-- Admins read the audit log. It stays append-only: still no UPDATE or DELETE for the app role.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'amber_app') THEN
+    GRANT SELECT ON audit_log TO amber_app;
+  END IF;
+END $$;

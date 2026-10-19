@@ -19,7 +19,9 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from amber import repository
+from amber.agent import settings as agent_settings
 from amber.agent.graph import create_agent_graph, get_agent_model
+from amber.agent.trace import TurnTrace
 from amber.util import audit, db
 from amber.util.config import Settings
 from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep, cookie_names, verified_session
@@ -75,6 +77,19 @@ def _serialize_data(stream_type: str, data: Any) -> str:
             message, metadata = data
             return json.dumps([_message_to_dict(message), metadata], default=_default_serializer)
     return json.dumps(data, default=_default_serializer)
+
+
+def _error_reference() -> str:
+    """A short id shown to the user and written to the log, so a report can be matched to the stack trace."""
+    return uuid.uuid4().hex[:8]
+
+
+def _stream_error(reference: str) -> dict[str, str]:
+    # Never send the exception text or traceback to the browser: it can include SQL, document text or config.
+    return {
+        "error": f"Amber couldn't finish this answer. Please try again. (Reference {reference})",
+        "reference": reference,
+    }
 
 
 def _litellm_models_url(base_url: str) -> str:
@@ -136,7 +151,9 @@ def _live_context(value: Any) -> str:
     return value[-_LIVE_MAX_CONTEXT_CHARS:].strip()
 
 
-def _live_connect_config(settings: Settings, context: str, resume_handle: str | None) -> types.LiveConnectConfig:
+def _live_connect_config(
+    settings: Settings, context: str, resume_handle: str | None, voice: str | None = None
+) -> types.LiveConnectConfig:
     instruction = f"{_LIVE_PROMPT}\n\nCurrent Amber chat context:\n{context or 'No messages yet.'}"
     return types.LiveConnectConfig(
         response_modalities=[types.Modality.AUDIO],
@@ -144,7 +161,7 @@ def _live_connect_config(settings: Settings, context: str, resume_handle: str | 
         tools=[_LIVE_DRAFT_TOOL],
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=settings.gemini_live_voice)
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice or settings.gemini_live_voice)
             )
         ),
         input_audio_transcription=types.AudioTranscriptionConfig(),
@@ -188,9 +205,9 @@ def _live_events(message: types.LiveServerMessage, pending_calls: dict[str, str]
 
 
 @router.get("/live/config")
-async def get_live_config(user: CurrentUser, settings: SettingsDep) -> dict[str, Any]:
+def get_live_config(user: CurrentUser, settings: SettingsDep, conn: DbDep) -> dict[str, Any]:
     """Expose only the configured Live model ID; the Gemini API key stays server-side."""
-    enabled = _live_enabled(settings)
+    enabled = _live_enabled(settings) and agent_settings.load_voice(conn).enabled
     return {"enabled": enabled, "model": settings.gemini_live_model if enabled else None}
 
 
@@ -226,6 +243,10 @@ async def live_agent(websocket: WebSocket) -> None:
             if user is None or user["status"] != "active":
                 await websocket.close(code=4401, reason="Not signed in")
                 return
+            voice = agent_settings.load_voice(conn)
+            if not voice.enabled:
+                await websocket.close(code=1013, reason="Opal voice is turned off by your administrator")
+                return
             audit.record(conn, websocket, "agent.live_session", user=user, detail={"model": settings.gemini_live_model})
             conn.commit()
     except HTTPException:
@@ -241,7 +262,9 @@ async def live_agent(websocket: WebSocket) -> None:
 
     await websocket.accept()
     try:
-        await asyncio.wait_for(_run_live_session(websocket, settings), timeout=settings.gemini_live_max_session_seconds)
+        # The admin's limit applies, but never above the server's own cap.
+        limit = min(voice.max_session_minutes * 60, settings.gemini_live_max_session_seconds)
+        await asyncio.wait_for(_run_live_session(websocket, settings, voice.voice), timeout=limit)
     except TimeoutError:
         await _close_live(websocket, 1000, "Voice session time limit reached")
     except _LiveSessionEnded as ended:
@@ -289,7 +312,7 @@ async def _receive_live(websocket: WebSocket) -> dict[str, Any]:
     return event
 
 
-async def _run_live_session(websocket: WebSocket, settings: Settings) -> None:
+async def _run_live_session(websocket: WebSocket, settings: Settings, voice: str | None = None) -> None:
     try:
         first = await asyncio.wait_for(_receive_live(websocket), timeout=_LIVE_START_TIMEOUT_SECONDS)
     except TimeoutError as exc:
@@ -302,7 +325,7 @@ async def _run_live_session(websocket: WebSocket, settings: Settings) -> None:
     announced = False
 
     while True:
-        config = _live_connect_config(settings, state["context"], state["handle"])
+        config = _live_connect_config(settings, state["context"], state["handle"], voice)
         async with client.aio.live.connect(model=settings.gemini_live_model, config=config) as session:
             if not announced:
                 await _send_live(websocket, {"type": "ready", "model": settings.gemini_live_model})
@@ -434,11 +457,27 @@ async def _available_models(request: Request, settings: Settings) -> list[str]:
     return models
 
 
+async def _default_model(request: Request, settings: Settings, conn: Any) -> str:
+    """The admin's default chat model while the proxy still offers it; otherwise AMBER_AGENT_MODEL_NAME."""
+    chosen = agent_settings.load_chat(conn).default_model
+    if not chosen or not settings.litellm_base_url:
+        return settings.agent_model_name
+    try:
+        available = await _available_models(request, settings)
+    except HTTPException:
+        return chosen  # the proxy is unreachable right now; keep the admin's choice
+    if chosen in available:
+        return chosen
+    log.warning("Admin default model %s is no longer offered by LiteLLM; using %s", chosen, settings.agent_model_name)
+    return settings.agent_model_name
+
+
 @router.get("/models")
 async def list_agent_models(
     request: Request,
     user: CurrentUser,
     settings: SettingsDep,
+    conn: DbDep,
 ) -> dict[str, Any]:
     """List model IDs available to Amber through the configured LiteLLM proxy."""
     if not settings.litellm_base_url:
@@ -450,7 +489,7 @@ async def list_agent_models(
 
     return {
         "enabled": True,
-        "default_model": settings.agent_model_name,
+        "default_model": await _default_model(request, settings, conn),
         "models": await _available_models(request, settings),
     }
 
@@ -502,6 +541,10 @@ async def stream_agent_v2(
         if body.model not in available_models:
             raise HTTPException(status_code=400, detail="The selected model is not available")
         config["configurable"]["model_name"] = body.model
+    else:
+        default_model = await _default_model(request, settings, conn)
+        if default_model != settings.agent_model_name:
+            config["configurable"]["model_name"] = default_model
     if body.decision is None and not body.message.strip():
         raise HTTPException(status_code=400, detail="A message is required")
     if body.decision is not None:
@@ -518,11 +561,15 @@ async def stream_agent_v2(
             for interrupt in getattr(task, "interrupts", ())
             if isinstance(getattr(interrupt, "value", None), dict)
         ]
-        if not any(
-            item.get("type") == "workspace_approval"
-            and item.get("operation_id") == body.operation_id
-            for item in pending
-        ):
+        decided = next(
+            (
+                item
+                for item in pending
+                if item.get("type") == "workspace_approval" and item.get("operation_id") == body.operation_id
+            ),
+            None,
+        )
+        if decided is None:
             raise HTTPException(status_code=409, detail="This approval is no longer pending")
         graph_input: Any = Command(
             resume={"approved": body.decision == "approve", "operation_id": body.operation_id}
@@ -539,8 +586,55 @@ async def stream_agent_v2(
         }
     conn.commit()
 
+    model_name = config["configurable"].get("model_name") or settings.agent_model_name
+    if body.decision is None:
+        turn = TurnTrace(query=body.message.strip(), kind="chat", model=model_name)
+        approval_detail = None
+    else:
+        verb = "Approved" if body.decision == "approve" else "Rejected"
+        title = str(decided.get("title") or decided.get("tool") or "a workspace change")
+        turn = TurnTrace(query=f"{verb}: {title}"[:2000], kind="approval", model=model_name)
+        approval_detail = {
+            "decision": body.decision,
+            "operation_id": body.operation_id,
+            "title": title[:255],
+            "tool": decided.get("tool"),
+        }
+    loop = asyncio.get_running_loop()
+
+    def save_trace(outcome: dict[str, Any]) -> None:
+        """Writes the trace and its audit events in one transaction. Runs in a worker thread so it also
+        completes when the browser disconnects mid-stream."""
+        try:
+            with db.connect(settings) as trace_conn:
+                trace = repository.insert_query_trace(
+                    trace_conn, user_id=user["id"], conversation_id=conversation_id, **outcome
+                )
+                detail = {
+                    "trace_id": str(trace["id"]),
+                    "status": outcome["status"],
+                    "model": outcome["model"],
+                    "tools": turn.tools_used,
+                }
+                audit.record(
+                    trace_conn, request, "agent.chat_message", user=user, target=str(conversation_id), detail=detail
+                )
+                if approval_detail is not None:
+                    audit.record(
+                        trace_conn,
+                        request,
+                        "agent.approval",
+                        user=user,
+                        target=str(conversation_id),
+                        detail={**approval_detail, "trace_id": str(trace["id"])},
+                    )
+                trace_conn.commit()
+        except Exception:
+            log.exception("Could not record the query trace for conversation %s", conversation_id)
+
     async def sse_generator():
-        print(f"[SSE_V2] Starting stream for thread_id={thread_id}, message={body.message!r}")
+        log.debug("Chat stream starting for conversation %s", thread_id)
+        outcome: dict[str, Any] | None = None
         yield f"event: metadata\ndata: {json.dumps({'thread_id': thread_id})}\n\n"
         try:
             async for chunk in graph.astream(
@@ -552,15 +646,15 @@ async def stream_agent_v2(
                 stream_type = chunk.get("type", "unknown")
                 ns = chunk.get("ns", ())
                 data = chunk.get("data")
+                if stream_type == "updates" and not ns:
+                    turn.observe_update(data)
 
                 if ns:
                     event_name = f"{stream_type}|{'|'.join(ns)}"
                 else:
                     event_name = stream_type
 
-                print(f"[SSE_V2] Chunk type={stream_type}, event_name={event_name}, data={data}")
                 serialized_data = _serialize_data(stream_type, data)
-                print(f"[SSE_V2] Yielding serialized_data={serialized_data[:200]}...")
                 yield f"event: {event_name}\ndata: {serialized_data}\n\n"
             if getattr(graph, "checkpointer", None):
                 final_state = await graph.aget_state(config)
@@ -568,14 +662,18 @@ async def stream_agent_v2(
                     for pending_interrupt in getattr(task, "interrupts", ()):
                         value = getattr(pending_interrupt, "value", None)
                         if isinstance(value, dict) and value.get("type") == "workspace_approval":
+                            turn.awaiting_approval = True
                             yield f"event: approval\ndata: {json.dumps(value, default=_default_serializer)}\n\n"
-            print("[SSE_V2] Stream completed successfully, yielding [DONE]")
+            outcome = turn.finish()
             yield "event: end\ndata: [DONE]\n\n"
         except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            print(f"[SSE_V2] Error during streaming: {e}\n{tb}")
-            yield f"event: error\ndata: {json.dumps({'error': str(e), 'traceback': tb})}\n\n"
+            reference = _error_reference()
+            log.exception("Chat stream failed for conversation %s (reference %s)", thread_id, reference)
+            outcome = turn.finish(error=f"[{reference}] {type(e).__name__}: {e}")
+            yield f"event: error\ndata: {json.dumps(_stream_error(reference))}\n\n"
+        finally:
+            # Not awaited: on a client disconnect this generator is being cancelled, so the write goes to a thread.
+            loop.run_in_executor(None, save_trace, outcome or turn.finish(stopped=True))
 
     return StreamingResponse(
         sse_generator(),
@@ -674,8 +772,10 @@ def chat_agent(request: Request, body: ChatRequest, user: CurrentUser) -> Stream
                 yield f"data: {json.dumps({'type': 'tool_results_complete', 'tool_results': tool_results})}\n\n"
                 
             yield "data: [DONE]\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        except Exception:
+            reference = _error_reference()
+            log.exception("Chat failed for conversation %s (reference %s)", thread_id, reference)
+            yield f"data: {json.dumps(_stream_error(reference))}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -751,6 +851,7 @@ def get_conversation(
 
 @router.put("/conversations/{thread_id}", dependencies=[CsrfProtected])
 def rename_conversation(
+    request: Request,
     thread_id: uuid.UUID,
     req: ConversationName,
     user: CurrentUser,
@@ -763,6 +864,7 @@ def rename_conversation(
         conversation = repository.update_conversation_title(conn, thread_id, user["id"], name)
     except LookupError:
         raise HTTPException(status_code=404, detail="Conversation not found") from None
+    audit.record(conn, request, "agent.conversation_renamed", user=user, target=str(thread_id), detail={"title": name})
     conn.commit()
     return {"id": str(conversation["id"]), "title": conversation["title"]}
 
@@ -788,6 +890,14 @@ async def remove_conversation(
         if inspect.isawaitable(deleted):
             await deleted
     repository.delete_conversation(conn, thread_id, user["id"])
+    audit.record(
+        conn,
+        request,
+        "agent.conversation_deleted",
+        user=user,
+        target=str(thread_id),
+        detail={"title": conversation.get("title")},
+    )
     conn.commit()
     return {"success": True}
 

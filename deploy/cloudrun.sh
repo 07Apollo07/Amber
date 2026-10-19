@@ -12,6 +12,8 @@ API_SA="amber-api@$PROJECT_ID.iam.gserviceaccount.com"
 WEB_SA="amber-web@$PROJECT_ID.iam.gserviceaccount.com"
 # Cloud Run URLs are predictable, so each service can be told the other's address before it exists.
 WEB_URL="https://amber-web-$PROJECT_NUMBER.$REGION.run.app"
+# The address users sign in on. OAuth, cookies and the WebSocket origin check are pinned to it.
+PUBLIC_URL="${PUBLIC_BASE_URL:-$WEB_URL}"
 API_URL="https://amber-api-$PROJECT_NUMBER.$REGION.run.app"
 KMS_KEY="projects/$PROJECT_ID/locations/$REGION/keyRings/amber/cryptoKeys/oauth-tokens"
 SECRETS=(amber-oauth-client-secret amber-firebase-web-api-key amber-gemini-api-key amber-state-cookie-key amber-database-dsn amber-litellm-api-key amber-drive-sync-secret)
@@ -37,8 +39,8 @@ setup() {  # one time
     gcloud secrets describe "$s" >/dev/null 2>&1 || gcloud secrets create "$s" --replication-policy automatic
     gcloud secrets add-iam-policy-binding "$s" --member "serviceAccount:$API_SA" --role roles/secretmanager.secretAccessor >/dev/null
   done
-  echo "Next: add the secret values (deploy/cloudrun.sh secrets), then register $WEB_URL/api/auth/google/callback"
-  echo "as an authorized redirect URI (and $WEB_URL as an origin) on the OAuth client."
+  echo "Next: add the secret values (deploy/cloudrun.sh secrets), then register $PUBLIC_URL/api/auth/google/callback"
+  echo "as an authorized redirect URI (and $PUBLIC_URL as an origin) on the OAuth client."
 }
 
 secrets() {  # prompts for each value; nothing is echoed or written to disk
@@ -67,7 +69,7 @@ deploy() {
   local envfile; envfile=$(mktemp); trap 'rm -f "$envfile"' EXIT
   cat > "$envfile" <<YAML
 AMBER_ENV: prod
-AMBER_PUBLIC_BASE_URL: "$WEB_URL"
+AMBER_PUBLIC_BASE_URL: "$PUBLIC_URL"
 AMBER_COOKIE_SECURE: "true"
 AMBER_GOOGLE_OAUTH_CLIENT_ID: "$GOOGLE_OAUTH_CLIENT_ID"
 AMBER_FIREBASE_PROJECT_ID: "$FIREBASE_PROJECT_ID"
@@ -90,7 +92,7 @@ YAML
   gcloud run deploy amber-web --image "$REPO/web:$tag" --region "$REGION" --service-account "$WEB_SA" \
     --allow-unauthenticated --memory 512Mi --timeout 3600 --min-instances 0 --max-instances 3 --port 3000 \
     --set-env-vars "AMBER_API_ORIGIN=$API_URL"
-  echo "Open $WEB_URL"
+  echo "Open $PUBLIC_URL"
 }
 
 "${1:?usage: $0 setup|secrets|deploy}"

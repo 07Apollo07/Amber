@@ -24,7 +24,8 @@ export function proxy(request: NextRequest) {
 
   const csp = [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' https://apis.google.com${isDev ? " 'unsafe-eval'" : ""}`,
+    // 'wasm-unsafe-eval' lets the Opal persona compile Rive's self-hosted WebAssembly; it does not allow JS eval.
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'wasm-unsafe-eval' https://apis.google.com${isDev ? " 'unsafe-eval'" : ""}`,
     // Radix positions popovers with inline style attributes, which nonces can't cover.
     "style-src 'self' 'unsafe-inline' https://www.gstatic.com https://ssl.gstatic.com",
     // The Google Picker (Drive file chooser) loads its script, frame, styles and thumbnails from Google.

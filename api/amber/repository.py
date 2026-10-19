@@ -236,7 +236,7 @@ def is_session_revoked(conn: Connection, token_hash: bytes) -> bool:
     return row is not None
 
 
-# ---- audit log (INSERT only; the app role can't read or change it) ----
+# ---- audit log (append-only: the app role can add and read rows, never change them) ----
 
 
 def insert_audit(
@@ -278,6 +278,14 @@ def set_app_user_context(conn: Connection, user_email: str, user_domain: str | N
 def set_drive_sync_context(conn: Connection) -> None:
     """Allow trusted Drive imports and webhook reconciliation to access source records."""
     execute(conn, "SELECT set_config('app.drive_sync', 'true', true)")
+
+
+def set_admin_metadata_context(conn: Connection) -> None:
+    """Lets admin views see every document's metadata for the rest of this transaction.
+
+    Uses the same RLS switch as Drive sync. Callers select metadata columns and counts only, never
+    `chunks.text`: admins review who can open a file, not what is in it."""
+    set_drive_sync_context(conn)
 
 
 # ---- Documents ----
@@ -1106,40 +1114,191 @@ def list_messages_for_conversation(conn: Connection, conversation_id: uuid.UUID)
 def insert_query_trace(
     conn: Connection,
     *,
-    user_id: uuid.UUID | None = None,
-    conversation_id: uuid.UUID | None = None,
-    query_text: str,
-    retrieval_mode: str,
-    chunks_retrieved: list[Any] | None = None,
-    latency_ms: int | None = None,
-    llm_model: str | None = None,
-    prompt_tokens: int | None = None,
-    completion_tokens: int | None = None,
-    filters_applied: dict[str, Any] | None = None,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID | None,
+    kind: str,
+    status: str,
+    query: str,
+    model: str | None,
+    steps: list[dict[str, Any]],
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+    latency_ms: int,
+    error: str | None,
 ) -> Row:
+    """Records one chat turn. Steps hold tool names, inputs, outcomes and source metadata, never passage text."""
+    total = (prompt_tokens or 0) + (completion_tokens or 0) if (prompt_tokens or completion_tokens) else None
     row = fetch_one(
         conn,
         """
-        INSERT INTO query_traces (user_id, conversation_id, query_text, retrieval_mode, chunks_retrieved, latency_ms, llm_model, prompt_tokens, completion_tokens, filters_applied)
-        VALUES (%(user_id)s, %(conversation_id)s, %(query_text)s, %(retrieval_mode)s, %(chunks_retrieved)s, %(latency_ms)s, %(llm_model)s, %(prompt_tokens)s, %(completion_tokens)s, %(filters_applied)s)
+        INSERT INTO query_traces (user_id, conversation_id, kind, status, query, model, steps,
+                                  prompt_tokens, completion_tokens, tokens, latency_ms, error)
+        VALUES (%(user_id)s, %(conversation_id)s, %(kind)s, %(status)s, %(query)s, %(model)s, %(steps)s,
+                %(prompt_tokens)s, %(completion_tokens)s, %(tokens)s, %(latency_ms)s, %(error)s)
         RETURNING *
         """,
         {
             "user_id": user_id,
             "conversation_id": conversation_id,
-            "query_text": query_text,
-            "retrieval_mode": retrieval_mode,
-            "chunks_retrieved": psycopg2.extras.Json(chunks_retrieved) if chunks_retrieved is not None else None,
-            "latency_ms": latency_ms,
-            "llm_model": llm_model,
+            "kind": kind,
+            "status": status,
+            "query": query,
+            "model": model,
+            "steps": psycopg2.extras.Json(steps),
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
-            "filters_applied": psycopg2.extras.Json(filters_applied) if filters_applied is not None else None,
+            "tokens": total,
+            "latency_ms": latency_ms,
+            "error": error,
         },
     )
     if row is None:
         raise RuntimeError("Failed to insert query trace")
     return row
+
+
+def list_query_traces(
+    conn: Connection,
+    *,
+    limit: int,
+    before: tuple[datetime, uuid.UUID] | None = None,
+    user_id: uuid.UUID | None = None,
+    status: str | None = None,
+    search: str | None = None,
+) -> list[Row]:
+    """Newest first, keyset-paginated on (created_at, id). Admin only."""
+    filters = ["TRUE"]
+    params: dict[str, Any] = {"limit": limit}
+    if before is not None:
+        filters.append("(t.created_at, t.id) < (%(before_at)s, %(before_id)s)")
+        params["before_at"], params["before_id"] = before
+    if user_id is not None:
+        filters.append("t.user_id = %(user_id)s")
+        params["user_id"] = user_id
+    if status is not None:
+        filters.append("t.status = %(status)s")
+        params["status"] = status
+    if search:
+        filters.append("t.query ILIKE %(search)s")
+        params["search"] = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    return fetch_all(
+        conn,
+        f"""
+        SELECT t.id, t.user_id, t.conversation_id, t.kind, t.status, t.query, t.model, t.steps,
+               t.prompt_tokens, t.completion_tokens, t.tokens, t.latency_ms, t.error, t.created_at,
+               u.email AS user_email, u.name AS user_name
+          FROM query_traces t
+          JOIN users u ON u.id = t.user_id
+         WHERE {" AND ".join(filters)}
+         ORDER BY t.created_at DESC, t.id DESC
+         LIMIT %(limit)s
+        """,
+        params,
+    )
+
+
+def get_query_trace(conn: Connection, trace_id: uuid.UUID) -> Row | None:
+    return fetch_one(
+        conn,
+        """
+        SELECT t.*, u.email AS user_email, u.name AS user_name
+          FROM query_traces t
+          JOIN users u ON u.id = t.user_id
+         WHERE t.id = %(id)s
+        """,
+        {"id": trace_id},
+    )
+
+
+def list_audit_events(
+    conn: Connection,
+    *,
+    limit: int,
+    before_id: int | None = None,
+    actor_user_id: uuid.UUID | None = None,
+    action_prefixes: list[str] | None = None,
+    actions: list[str] | None = None,
+    search: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[Row]:
+    """Newest first, keyset-paginated on id. `action_prefixes` and `actions` together select a category."""
+    filters = ["TRUE"]
+    params: dict[str, Any] = {"limit": limit}
+    if before_id is not None:
+        filters.append("a.id < %(before_id)s")
+        params["before_id"] = before_id
+    if actor_user_id is not None:
+        filters.append("a.actor_user_id = %(actor)s")
+        params["actor"] = actor_user_id
+    category: list[str] = []
+    if action_prefixes:
+        category.append("a.action LIKE ANY(%(prefixes)s)")
+        params["prefixes"] = [p + "%" for p in action_prefixes]
+    if actions:
+        category.append("a.action = ANY(%(actions)s)")
+        params["actions"] = actions
+    if category:
+        filters.append("(" + " OR ".join(category) + ")")
+    if search:
+        filters.append(
+            "(a.target ILIKE %(search)s OR a.actor_email ILIKE %(search)s OR a.action ILIKE %(search)s"
+            " OR a.detail::text ILIKE %(search)s)"
+        )
+        params["search"] = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    if start is not None:
+        filters.append("a.at >= %(start)s")
+        params["start"] = start
+    if end is not None:
+        filters.append("a.at < %(end)s")
+        params["end"] = end
+    return fetch_all(
+        conn,
+        f"""
+        SELECT a.id, a.at, a.actor_user_id, a.actor_email, a.action, a.target, a.detail, a.ip,
+               u.name AS actor_name
+          FROM audit_log a
+          LEFT JOIN users u ON u.id = a.actor_user_id
+         WHERE {" AND ".join(filters)}
+         ORDER BY a.id DESC
+         LIMIT %(limit)s
+        """,
+        params,
+    )
+
+
+def resolve_audit_targets(conn: Connection, ids: list[uuid.UUID]) -> dict[str, Row]:
+    """Names for the ids audit rows point at: conversations, collections and documents (metadata only).
+    Anything since deleted is simply left out."""
+    if not ids:
+        return {}
+    set_admin_metadata_context(conn)
+    rows = fetch_all(
+        conn,
+        """
+        SELECT id::text AS id, 'conversation' AS kind, title AS label FROM conversations WHERE id = ANY(%(ids)s)
+        UNION ALL
+        SELECT id::text, 'collection', name FROM collections WHERE id = ANY(%(ids)s)
+        UNION ALL
+        SELECT id::text, 'document', title FROM documents WHERE id = ANY(%(ids)s)
+        """,
+        {"ids": ids},
+    )
+    return {row["id"]: row for row in rows}
+
+
+def list_audit_actors(conn: Connection) -> list[Row]:
+    """Everyone who appears in the audit log, for the admin filter."""
+    return fetch_all(
+        conn,
+        """
+        SELECT DISTINCT ON (a.actor_user_id) a.actor_user_id, coalesce(u.email, a.actor_email) AS email, u.name
+          FROM audit_log a
+          LEFT JOIN users u ON u.id = a.actor_user_id
+         WHERE a.actor_user_id IS NOT NULL
+         ORDER BY a.actor_user_id, a.id DESC
+        """,
+    )
 
 
 def insert_feedback(
@@ -1169,6 +1328,21 @@ def insert_feedback(
 
 def get_setting(conn: Connection, key: str) -> Row | None:
     return fetch_one(conn, "SELECT * FROM settings WHERE key = %(key)s", {"key": key})
+
+
+def list_settings_with_editors(conn: Connection, keys: list[str]) -> dict[str, Row]:
+    """Saved settings rows with the name of whoever last changed each one."""
+    rows = fetch_all(
+        conn,
+        """
+        SELECT s.key, s.value, s.updated_at, u.name AS updated_by_name, u.email AS updated_by_email
+          FROM settings s
+          LEFT JOIN users u ON u.id = s.updated_by
+         WHERE s.key = ANY(%(keys)s)
+        """,
+        {"keys": keys},
+    )
+    return {row["key"]: row for row in rows}
 
 
 def set_setting(conn: Connection, key: str, value: Any, updated_by: uuid.UUID | None = None) -> Row:
@@ -1659,28 +1833,253 @@ def delete_user(conn: Connection, user_id: uuid.UUID) -> None:
     execute(conn, "DELETE FROM users WHERE id = %(id)s", {"id": user_id})
 
 
-def list_all_documents(conn: Connection, limit: int = 500) -> list[Row]:
-    """Every document with its owner, tags and full access list. Metadata only, never the text."""
+# ---- admin: documents (metadata only, never chunk text) ----
+
+ADMIN_DOCUMENT_COLUMNS = """
+        d.id, d.title, d.file_type, d.origin, d.status, d.status_message, d.sharing_option,
+        d.drive_file_id, d.file_size_bytes, d.created_at, d.updated_at,
+        CASE WHEN d.drive_file_id IS NULL THEN u.name ELSE d.drive_owner_name END AS owner_name,
+        CASE WHEN d.drive_file_id IS NULL THEN u.email ELSE d.drive_owner_email END AS owner_email,
+        importer.name AS importer_name, importer.email AS importer_email,
+        (SELECT count(*) FROM chunks ch WHERE ch.document_id = d.id) AS chunk_count,
+        COALESCE((SELECT array_agg(t.name ORDER BY t.name)
+                    FROM document_tags dt JOIN tags t ON t.id = dt.tag_id
+                   WHERE dt.document_id = d.id), '{}') AS tags,
+        COALESCE((SELECT json_agg(json_build_object('type', da.principal_type, 'value', da.principal_value,
+                                                    'origin', da.origin) ORDER BY da.principal_type, da.principal_value)
+                    FROM document_access da WHERE da.document_id = d.id), '[]') AS access
+"""
+
+# Admin status groups. "processing" is everything still on its way to being searchable.
+DOCUMENT_STATUS_GROUPS = {
+    "ready": "d.status = 'indexed'",
+    "failed": "d.status = 'failed'",
+    "processing": "d.status NOT IN ('indexed', 'failed')",
+}
+
+
+def _like(value: str) -> str:
+    return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def list_admin_documents(
+    conn: Connection,
+    *,
+    limit: int,
+    before: tuple[datetime, uuid.UUID] | None = None,
+    status_group: str | None = None,
+    origin: str | None = None,
+    sharing: str | None = None,
+    search: str | None = None,
+) -> list[Row]:
+    """Every document's metadata, newest first, keyset-paginated on (created_at, id)."""
+    set_admin_metadata_context(conn)
+    filters = ["TRUE"]
+    params: dict[str, Any] = {"limit": limit}
+    if before is not None:
+        filters.append("(d.created_at, d.id) < (%(before_at)s, %(before_id)s)")
+        params["before_at"], params["before_id"] = before
+    if status_group is not None:
+        filters.append(DOCUMENT_STATUS_GROUPS[status_group])
+    if origin is not None:
+        filters.append("d.origin = %(origin)s")
+        params["origin"] = origin
+    if sharing is not None:
+        filters.append("d.sharing_option = %(sharing)s")
+        params["sharing"] = sharing
+    if search:
+        filters.append(
+            """(d.title ILIKE %(search)s OR u.email ILIKE %(search)s OR u.name ILIKE %(search)s
+                OR d.drive_owner_email ILIKE %(search)s OR d.drive_owner_name ILIKE %(search)s
+                OR importer.email ILIKE %(search)s OR importer.name ILIKE %(search)s
+                OR EXISTS (SELECT 1 FROM document_tags dt JOIN tags t ON t.id = dt.tag_id
+                            WHERE dt.document_id = d.id AND t.name ILIKE %(search)s))"""
+        )
+        params["search"] = _like(search)
     return fetch_all(
         conn,
-        """
-        SELECT d.id, d.title, d.file_type, d.origin, d.status, d.status_message, d.sharing_option,
-               d.drive_file_id, d.file_size_bytes, d.created_at, d.updated_at,
-               CASE WHEN d.drive_file_id IS NULL THEN u.name ELSE d.drive_owner_name END AS owner_name,
-               CASE WHEN d.drive_file_id IS NULL THEN u.email ELSE d.drive_owner_email END AS owner_email,
-               importer.name AS importer_name, importer.email AS importer_email,
-               (SELECT count(*) FROM chunks ch WHERE ch.document_id = d.id) AS chunk_count,
-               COALESCE((SELECT array_agg(t.name ORDER BY t.name)
-                           FROM document_tags dt JOIN tags t ON t.id = dt.tag_id
-                          WHERE dt.document_id = d.id), '{}') AS tags,
-               COALESCE((SELECT json_agg(json_build_object('type', da.principal_type, 'value', da.principal_value,
-                                                           'origin', da.origin) ORDER BY da.principal_type, da.principal_value)
-                           FROM document_access da WHERE da.document_id = d.id), '[]') AS access
+        f"""
+        SELECT {ADMIN_DOCUMENT_COLUMNS}
           FROM documents d
           JOIN users u ON u.id = d.owner_id
           LEFT JOIN users importer ON importer.id = COALESCE(d.imported_by_user_id, d.owner_id)
-         ORDER BY d.created_at DESC
+         WHERE {" AND ".join(filters)}
+         ORDER BY d.created_at DESC, d.id DESC
+         LIMIT %(limit)s
+        """,
+        params,
+    )
+
+
+def admin_document_counts(conn: Connection) -> Row:
+    """Library totals for the admin summary chips and the analytics health panel."""
+    set_admin_metadata_context(conn)
+    row = fetch_one(
+        conn,
+        f"""
+        SELECT count(*) AS total,
+               count(*) FILTER (WHERE {DOCUMENT_STATUS_GROUPS["ready"]}) AS ready,
+               count(*) FILTER (WHERE {DOCUMENT_STATUS_GROUPS["processing"]}) AS processing,
+               count(*) FILTER (WHERE {DOCUMENT_STATUS_GROUPS["failed"]}) AS failed,
+               count(*) FILTER (WHERE d.origin = 'drive_sync') AS from_drive,
+               count(*) FILTER (WHERE d.origin <> 'drive_sync') AS uploaded,
+               COALESCE(sum(d.file_size_bytes), 0) AS total_bytes
+          FROM documents d
+        """,
+    )
+    return row or {}
+
+
+def get_admin_document(conn: Connection, document_id: uuid.UUID) -> Row | None:
+    set_admin_metadata_context(conn)
+    return fetch_one(
+        conn,
+        f"""
+        SELECT {ADMIN_DOCUMENT_COLUMNS}
+          FROM documents d
+          JOIN users u ON u.id = d.owner_id
+          LEFT JOIN users importer ON importer.id = COALESCE(d.imported_by_user_id, d.owner_id)
+         WHERE d.id = %(id)s
+        """,
+        {"id": document_id},
+    )
+
+
+def recent_failed_documents(conn: Connection, limit: int = 5) -> list[Row]:
+    set_admin_metadata_context(conn)
+    return fetch_all(
+        conn,
+        """
+        SELECT d.id, d.title, d.file_type, d.status_message, d.updated_at
+          FROM documents d
+         WHERE d.status = 'failed'
+         ORDER BY d.updated_at DESC
          LIMIT %(limit)s
         """,
         {"limit": limit},
+    )
+
+
+def document_source_usage(conn: Connection, document_id: uuid.UUID) -> Row:
+    """How often chat answers found this document, from the admin query traces."""
+    row = fetch_one(
+        conn,
+        """
+        SELECT count(DISTINCT t.id) AS answers, count(DISTINCT t.user_id) AS people, max(t.created_at) AS last_used
+          FROM query_traces t
+          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(t.steps, '[]'::jsonb)) step
+          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(step->'sources', '[]'::jsonb)) source
+         WHERE source->>'document_id' = %(id)s
+        """,
+        {"id": str(document_id)},
+    )
+    return row or {"answers": 0, "people": 0, "last_used": None}
+
+
+# ---- admin: analytics (aggregates over query_traces) ----
+
+
+def trace_window_stats(conn: Connection, start: datetime, end: datetime) -> Row:
+    row = fetch_one(
+        conn,
+        """
+        SELECT count(*) AS questions,
+               count(DISTINCT user_id) AS people,
+               count(*) FILTER (WHERE status = 'completed') AS completed,
+               count(*) FILTER (WHERE status = 'failed') AS failed,
+               count(*) FILTER (WHERE status = 'awaiting_approval') AS awaiting_approval,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) AS median_ms,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95_ms
+          FROM query_traces
+         WHERE kind = 'chat' AND created_at >= %(start)s AND created_at < %(end)s
+        """,
+        {"start": start, "end": end},
+    )
+    return row or {}
+
+
+def traces_per_day(conn: Connection, start: datetime, end: datetime, tz: str) -> list[Row]:
+    """Questions per local calendar day, including days with none."""
+    return fetch_all(
+        conn,
+        """
+        WITH days AS (
+            SELECT generate_series(
+                       date_trunc('day', %(start)s::timestamptz AT TIME ZONE %(tz)s),
+                       date_trunc('day', (%(end)s::timestamptz - interval '1 microsecond') AT TIME ZONE %(tz)s),
+                       interval '1 day'
+                   )::date AS day
+        )
+        SELECT days.day,
+               count(t.id) AS questions,
+               count(t.id) FILTER (WHERE t.status = 'failed') AS failed
+          FROM days
+          LEFT JOIN query_traces t
+            ON t.kind = 'chat'
+           AND t.created_at >= %(start)s AND t.created_at < %(end)s
+           AND (t.created_at AT TIME ZONE %(tz)s)::date = days.day
+         GROUP BY days.day
+         ORDER BY days.day
+        """,
+        {"start": start, "end": end, "tz": tz},
+    )
+
+
+def tool_usage(conn: Connection, start: datetime, end: datetime, limit: int = 8) -> list[Row]:
+    return fetch_all(
+        conn,
+        """
+        SELECT step->>'tool' AS tool,
+               count(*) AS calls,
+               count(*) FILTER (WHERE step->>'status' = 'failed') AS failed,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY (step->>'duration_ms')::numeric) AS median_ms
+          FROM query_traces t
+          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(t.steps, '[]'::jsonb)) step
+         WHERE t.created_at >= %(start)s AND t.created_at < %(end)s
+           AND step->>'type' = 'tool' AND step->>'tool' IS NOT NULL
+         GROUP BY 1
+         ORDER BY calls DESC, tool
+         LIMIT %(limit)s
+        """,
+        {"start": start, "end": end, "limit": limit},
+    )
+
+
+def top_sources(conn: Connection, start: datetime, end: datetime, limit: int = 8) -> list[Row]:
+    """Documents that chat answers found most often. Titles come from the trace (what the asker could see)."""
+    return fetch_all(
+        conn,
+        """
+        SELECT source->>'document_id' AS document_id,
+               max(source->>'title') AS title,
+               count(DISTINCT t.id) AS answers,
+               count(DISTINCT t.user_id) AS people
+          FROM query_traces t
+          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(t.steps, '[]'::jsonb)) step
+          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(step->'sources', '[]'::jsonb)) source
+         WHERE t.created_at >= %(start)s AND t.created_at < %(end)s AND source ? 'document_id'
+         GROUP BY 1
+         ORDER BY answers DESC, title
+         LIMIT %(limit)s
+        """,
+        {"start": start, "end": end, "limit": limit},
+    )
+
+
+def top_askers(conn: Connection, start: datetime, end: datetime, limit: int = 8) -> list[Row]:
+    return fetch_all(
+        conn,
+        """
+        SELECT u.id, u.email, u.name,
+               count(*) AS questions,
+               count(*) FILTER (WHERE t.status = 'failed') AS failed,
+               max(t.created_at) AS last_asked
+          FROM query_traces t
+          JOIN users u ON u.id = t.user_id
+         WHERE t.kind = 'chat' AND t.created_at >= %(start)s AND t.created_at < %(end)s
+         GROUP BY u.id, u.email, u.name
+         ORDER BY questions DESC, u.email
+         LIMIT %(limit)s
+        """,
+        {"start": start, "end": end, "limit": limit},
     )

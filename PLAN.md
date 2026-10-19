@@ -255,3 +255,72 @@ Gemini API access:
 7. Drive Picker and `changes` sync (shared with desktop uploads).
 8. Admin, analytics, and settings.
 9. gcloud setup scripts, `deploy.sh`, CI/CD, and the hardening pass (Terraform optional later).
+
+## Admin: chat query traces and audit log (2026-10-19)
+
+**Today:** the admin Traces and Audit tabs are empty placeholders. Nothing records chat traces (`insert_query_trace` has no callers and its columns don't match `query_traces`), and the API can't read `audit_log` (`amber_app` has INSERT only).
+
+### Database (apply by hand; added to `api/schema.sql`)
+- `query_traces` gains: `conversation_id`, `kind` (`chat` | `approval`), `status` (`completed` | `failed` | `awaiting_approval`), `steps jsonb`, `prompt_tokens`, `completion_tokens`, `error`. Index on `conversation_id`.
+- `GRANT SELECT ON audit_log TO amber_app`, so admins can read it. It stays append-only: still no UPDATE or DELETE. **Decision to confirm:** this loosens DECISION.MD §3's "INSERT only". The alternative is a separate read-only DB role and DSN for the admin endpoints.
+
+### Recording (API)
+- `/api/agent/v2/stream` builds a trace from the LangGraph `updates` stream as it runs: the question, model, each tool call (tool, short input, status, duration, a one-line result summary), token usage, total latency and any error. It is written once, after the stream ends, on its own connection.
+- `vector_search` returns structured sources as a tool artifact: document id, title, type, page and match score. **Chunk text is never stored in a trace.**
+- Privacy (Phase 6 policy): admins see the question, tool names and inputs, and source metadata and scores. They never see Amber's answer text or passage text.
+- New audit events, written in the same transaction as the action:
+  - `agent.chat_message`: target is the conversation; detail has the trace id, the tools used, and the model.
+  - `agent.approval`: approved or rejected, plus the operation.
+  - `agent.conversation_renamed` and `agent.conversation_deleted`.
+  - `admin.audit_export`.
+  - (`agent.live_session` exists already.)
+
+### Admin API
+- `GET /api/admin/traces?user=&status=&q=&before=` returns a paginated list of summaries. `GET /api/admin/traces/{id}` returns full detail.
+- `GET /api/admin/audit?actor=&category=&q=&from=&to=&before=` returns a paginated list, plus the actor list for the filter. `GET /api/admin/audit/export` returns CSV with the same filters, capped at 10,000 rows.
+
+### Admin UI, built to be easy to read
+- **Traces:** each row shows the question, who asked, a relative time, duration, small icons for the tools used, the number of sources, and a status badge. The detail sheet shows a numbered timeline in plain English ("Searched your documents for 'leave policy': 5 sources, 0.3 s"), then a sources table with a match bar, then model, tokens and timing.
+- **Audit:** events are grouped by day and written as sentences ("Anushka signed in", "Anushka approved a Google Doc edit"). A coloured category chip marks each one: Sign-in, Chat, Documents, Sharing, Drive or Admin. Exact time shows on hover. Click a row to expand it into a key/value list (no raw JSON). Filters cover user, category, date range and search. Export is a real CSV download. Pagination is "Load more".
+- Action codes map to labels in `ui/lib/audit-labels.ts`; an unknown code falls back to a readable version of the code.
+
+### Out of scope
+- The "N results hidden" count: `count_hidden_chunks` always returns 0 under chunk RLS (DECISION.MD gap). It needs its own fix.
+- Chat thumbs up/down feedback has no API yet.
+
+## Admin: Documents and Analytics tabs (2026-10-19)
+
+**Bug first:** the admin document list runs with no RLS user context, so in production (`amber_app`, FORCE RLS) it returns **no documents**. Dev hides this because it connects as the `postgres` superuser. The fix: admin metadata queries switch on the existing `app.drive_sync` context for that transaction, and select metadata only (never `chunks.text`). The same fix applies to audit target names and the analytics document counts.
+
+### Documents
+- API: `GET /api/admin/documents?status=&origin=&sharing=&q=&before=` returns a page of 50, keyset on (created_at, id), plus counts by status for the summary chips. `GET /api/admin/documents/{id}` returns the full access list and how many answers used the document as a source (from traces).
+- UI: summary chips (All / Ready / Processing / Failed) that act as filters, plus Source and Sharing filters and search. The table looks as it does today, with failures shown inline. Clicking a row opens a 40% side panel with the file facts, owner and who added it, the Drive link, tags, who can access it, the failure reason, and how often it was used.
+
+### Analytics
+- API: `GET /api/admin/analytics?days=7|30|90&tz=<IANA>`, made of SQL aggregates over `query_traces`, `documents` and `users`. Each figure is compared with the previous window of the same length.
+- UI, with a range picker above everything:
+  - KPI tiles: people asking, questions, answer success rate, median response time. Each shows the change from the previous period.
+  - Questions per day: a column chart in one hue, with a table view.
+  - Tools Amber used: horizontal bars in one hue, with the failure count.
+  - Most-used sources: a table.
+  - Most active people: a table.
+  - Library health: ready, processing and failed counts, plus recent failures.
+- The "Answers rated helpful" tile is dropped, because chat has no feedback API yet. Answer success rate replaces it.
+
+## Admin: Settings tab (2026-10-19)
+
+The placeholder "Answers" section (disabled controls that nothing reads) is replaced by settings the app actually honours. Each section saves on its own, shows who last changed it and when, and is audited (`admin.update_settings`, target = section, detail = from/to).
+
+| Section | Setting | Where it takes effect |
+|---|---|---|
+| Indexing (exists) | Chunk size, overlap, max file size | Ingestion and uploads (unchanged) |
+| Chat | Default model (from the LiteLLM list, or the server default) | `/api/agent/v2/stream` when the user hasn't picked one; `/api/agent/models` reports it as the default. A model that has left the proxy list falls back to `AMBER_AGENT_MODEL_NAME`. |
+| Chat | Passages per document search (1–20, default 5) | `vector_search` limit |
+| Chat | Web search on/off | `web_search` tells Amber it's turned off instead of searching |
+| Opal voice | On/off | `/live/config` and the `/live` WebSocket (refuses when off) |
+| Opal voice | Voice (Gemini Live prebuilt voices) | Live session config |
+| Opal voice | Session length limit (5–60 min) | Session timeout, never above `AMBER_GEMINI_LIVE_MAX_SESSION_SECONDS` |
+
+API: `GET /api/admin/settings` returns every section with its values, defaults, limits, options (models, voices), last editor, and whether the server has the feature configured at all. `PUT /api/admin/settings/{indexing|chat|voice}` saves one section.
+
+Not included (next candidate): limiting sign-in to approved email domains. It changes the auth flow, so it gets its own change.
