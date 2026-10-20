@@ -860,6 +860,7 @@ export function ChatLayout() {
   }
 
   function newChat() {
+    if (loading) return
     skipNextLoadRef.current = null
     setSidekickSession((value) => value + 1)
     setActiveId(null)
@@ -871,7 +872,7 @@ export function ChatLayout() {
   }
 
   function selectConversation(id: string) {
-    if (id === activeId) return
+    if (id === activeId || loading) return
     skipNextLoadRef.current = null
     setSidekickSession((value) => value + 1)
     setEntries([])
@@ -883,6 +884,7 @@ export function ChatLayout() {
   }
 
   function beginRename(conversation: ConversationRecord) {
+    if (loading) return
     setEditingId(conversation.id)
     setEditingTitle(conversation.title)
   }
@@ -915,6 +917,7 @@ export function ChatLayout() {
   }
 
   async function deleteConversation(conversation: ConversationRecord) {
+    if (loading) return
     if (!window.confirm(`Delete “${conversation.title}”? This cannot be undone.`)) return
 
     setSavingConversationId(conversation.id)
@@ -936,7 +939,7 @@ export function ChatLayout() {
 
   return (
     <div className="grid h-[calc(100dvh-5.5rem)] min-h-[520px] w-full grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,4fr)] xl:grid-cols-[minmax(0,1fr)_minmax(0,3fr)_minmax(260px,1fr)]">
-      <aside className="hidden min-w-0 flex-col overflow-hidden rounded-2xl border bg-card/70 p-3 lg:flex">
+      <aside className={cn("hidden min-w-0 flex-col overflow-hidden rounded-2xl border bg-card/70 p-3 lg:flex", loading && "pointer-events-none")}>
         <div className="mb-2 flex items-center justify-between border-b px-1 pb-3">
           <span className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
             <MessageSquare className="size-3.5" />
@@ -1016,7 +1019,7 @@ export function ChatLayout() {
               </p>
             </div>
           </div>
-          <Button variant="outline" size="sm" onClick={newChat} className="shrink-0">
+          <Button variant="outline" size="sm" onClick={newChat} disabled={loading} className="shrink-0">
             <Plus className="size-4" />
             New chat
           </Button>
@@ -1025,7 +1028,7 @@ export function ChatLayout() {
         {conversations.length > 0 && (
           <nav
             aria-label="Recent conversations"
-            className="flex gap-2 overflow-x-auto border-b px-3 py-2 lg:hidden"
+            className={cn("flex gap-2 overflow-x-auto border-b px-3 py-2 lg:hidden", loading && "pointer-events-none")}
           >
             {conversations.map((conversation) => (
               <div
