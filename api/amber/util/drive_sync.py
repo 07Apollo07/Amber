@@ -209,6 +209,17 @@ def process_drive_changes(conn: Connection, sync_state: dict[str, Any]) -> int:
                 try:
                     grants = drive.fetch_drive_permissions(service, file_id)
                 except Exception as exc:
+                    cause = exc.__cause__ or exc
+                    http_status = getattr(getattr(cause, "resp", None), "status", None)
+                    if http_status in (403, 404):
+                        # Drive only lets editors list permissions, so a view-only or no-longer-visible
+                        # file can never succeed. Keep its last known access rather than blocking the
+                        # cursor (and every other file's update) behind it.
+                        log.warning(
+                            "Skipping permission sync for Drive file %s: HTTP %s %s",
+                            file_id, http_status, type(cause).__name__,
+                        )
+                        continue
                     raise DriveSyncError(
                         f"Could not fetch permissions for Drive file {file_id}: {type(exc).__name__}"
                     ) from exc

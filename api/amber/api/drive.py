@@ -184,6 +184,9 @@ def import_drive_files(
             )
 
             conn.commit()  # keep the document even if indexing fails below, so its error can be shown
+            # The sync context is transaction-local, so the commit above cleared it. Without it the chunks
+            # policy can't see the document and every chunk insert is rejected.
+            repository.set_drive_sync_context(conn)
             index_document_content(conn, doc_id, file_bytes, mime_type, parse_name)
 
             # Mark as successfully indexed
