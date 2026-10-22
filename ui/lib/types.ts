@@ -137,6 +137,8 @@ export type UploadRow = {
   importedBy: { name: string | null; email: string | null }
   /** False for files shared with the user by someone else. */
   isOwner: boolean
+  /** File type (e.g., "pdf", "docx", "txt"). */
+  file_type?: string
 }
 
 /** A folder of documents, owned by the signed-in user. */

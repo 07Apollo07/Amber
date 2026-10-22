@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { ChevronRight, Folder, FolderOpen, FolderPlus, Inbox, MoreHorizontal, Pencil, RefreshCw, Search, Share2, Trash2, X } from "lucide-react"
+import { ChevronRight, Folder, FolderOpen, FolderPlus, Inbox, MoreHorizontal, Pencil, RefreshCw, Search, Share2, Trash2, X, List, LayoutDashboard } from "lucide-react"
 import { toast } from "sonner"
 
 import { EmptyState } from "@/components/app/empty-state"
@@ -105,6 +105,12 @@ export function ManageFiles({
   const [driveFoldersLoading, setDriveFoldersLoading] = useState(false)
   const [driveFoldersClosed, setDriveFoldersClosed] = useState<Set<string>>(new Set())
 
+  // View mode for files tab: "folder" | "list"
+  const [filesViewMode, setFilesViewMode] = useState<"folder" | "list">("list")
+  // List view sort/group state
+  const [listSort, setListSort] = useState<"updated-desc" | "updated-asc" | "name-asc" | "name-desc">("updated-desc")
+  const [listGroup, setListGroup] = useState<"none" | "file-type">("none")
+
   const fetchDriveFolders = useCallback(async () => {
     setDriveFoldersLoading(true)
     try {
@@ -139,6 +145,104 @@ export function ManageFiles({
     return currentPath ? `${currentPath} / ${node.name}` : node.name
   }
 
+  // Filter a folder tree to only include specified file IDs
+  function filterTreeByFileIds(tree: Record<string, DriveFolderNode>, allowedIds: Set<string>): Record<string, DriveFolderNode> {
+    function filterNode(node: DriveFolderNode): DriveFolderNode | null {
+      const filteredFileIds = node.file_ids.filter((id) => allowedIds.has(id))
+      const filteredChildren: Record<string, DriveFolderNode> = {}
+      for (const [childName, childNode] of Object.entries(node.children)) {
+        const filtered = filterNode(childNode)
+        if (filtered && (filtered.file_ids.length > 0 || Object.keys(filtered.children).length > 0)) {
+          filteredChildren[childName] = filtered
+        }
+      }
+      if (filteredFileIds.length === 0 && Object.keys(filteredChildren).length === 0) {
+        return null
+      }
+      return { ...node, file_ids: filteredFileIds, children: filteredChildren }
+    }
+
+    const result: Record<string, DriveFolderNode> = {}
+    for (const [rootName, rootNode] of Object.entries(tree)) {
+      const filtered = filterNode(rootNode)
+      if (filtered) {
+        result[rootName] = filtered
+      }
+    }
+    return result
+  }
+
+  // Build trees for owned vs shared files
+  const mineFileIds = useMemo(() => new Set(mine.map((r) => r.id)), [mine])
+  const sharedFileIds = useMemo(() => new Set(shared.map((r) => r.id)), [shared])
+  const myDriveTree = useMemo(() => filterTreeByFileIds(driveFoldersTree, mineFileIds), [driveFoldersTree, mineFileIds])
+  const sharedDriveTree = useMemo(() => filterTreeByFileIds(driveFoldersTree, sharedFileIds), [driveFoldersTree, sharedFileIds])
+  const myDriveUncategorized = useMemo(
+    () => uncategorizedIds.filter((id) => mineFileIds.has(id)),
+    [uncategorizedIds, mineFileIds]
+  )
+  const sharedUncategorized = useMemo(
+    () => uncategorizedIds.filter((id) => sharedFileIds.has(id)),
+    [uncategorizedIds, sharedFileIds]
+  )
+
+  // Sort and group functions for list view
+  const sortedMine = useMemo(() => {
+    let arr = [...mine]
+    if (listGroup === "file-type") {
+      arr.sort((a, b) => {
+        const typeA = a.file_type || "unknown"
+        const typeB = b.file_type || "unknown"
+        if (typeA !== typeB) return typeA.localeCompare(typeB)
+        return b.updatedAt.localeCompare(a.updatedAt)
+      })
+    } else {
+      switch (listSort) {
+        case "updated-asc":
+          arr.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+          break
+        case "updated-desc":
+          arr.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+          break
+        case "name-asc":
+          arr.sort((a, b) => a.name.localeCompare(b.name))
+          break
+        case "name-desc":
+          arr.sort((a, b) => b.name.localeCompare(a.name))
+          break
+      }
+    }
+    return arr
+  }, [mine, listSort, listGroup])
+
+  const sortedShared = useMemo(() => {
+    let arr = [...shared]
+    if (listGroup === "file-type") {
+      arr.sort((a, b) => {
+        const typeA = a.file_type || "unknown"
+        const typeB = b.file_type || "unknown"
+        if (typeA !== typeB) return typeA.localeCompare(typeB)
+        return b.updatedAt.localeCompare(a.updatedAt)
+      })
+    } else {
+      switch (listSort) {
+        case "updated-asc":
+          arr.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))
+          break
+        case "updated-desc":
+          arr.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+          break
+        case "name-asc":
+          arr.sort((a, b) => a.name.localeCompare(b.name))
+          break
+        case "name-desc":
+          arr.sort((a, b) => b.name.localeCompare(a.name))
+          break
+      }
+    }
+    return arr
+  }, [shared, listSort, listGroup])
+
   const renderFileRow = (row: UploadRow) => (
     <FileRow
       key={row.id}
@@ -170,7 +274,6 @@ export function ManageFiles({
           <TabsList>
             <TabsTrigger value="files">File management</TabsTrigger>
             <TabsTrigger value="collections">Collections</TabsTrigger>
-            <TabsTrigger value="drive-folders">Drive folders</TabsTrigger>
           </TabsList>
 
           <TabsContent value="files" className="space-y-4">
@@ -245,22 +348,153 @@ export function ManageFiles({
               </section>
             )}
 
-            <Tabs defaultValue="my-files">
-              <TabsList>
-                <TabsTrigger value="my-files">My files ({mine.length})</TabsTrigger>
-                <TabsTrigger value="shared-with-me">Shared with me ({shared.length})</TabsTrigger>
-              </TabsList>
-              <TabsContent value="my-files">
-                {mine.length ? (
-                  <ul className="divide-y divide-border/60 overflow-hidden rounded-xl border bg-card/40">{mine.map(renderFileRow)}</ul>
-                ) : <p className="py-6 text-center text-sm text-muted-foreground">No files owned by you match these filters.</p>}
-              </TabsContent>
-              <TabsContent value="shared-with-me">
-                {shared.length ? (
-                  <ul className="divide-y divide-border/60 overflow-hidden rounded-xl border bg-card/40">{shared.map(renderFileRow)}</ul>
-                ) : <p className="py-6 text-center text-sm text-muted-foreground">No files shared with you match these filters.</p>}
-              </TabsContent>
-            </Tabs>
+            {/* View mode toggle and list controls */}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-1" role="group" aria-label="View mode">
+                <Button
+                  variant={filesViewMode === "list" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setFilesViewMode("list")}
+                  aria-pressed={filesViewMode === "list"}
+                >
+                  <List className="size-4" />
+                  <span className="ml-1">List</span>
+                </Button>
+                <Button
+                  variant={filesViewMode === "folder" ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setFilesViewMode("folder")}
+                  aria-pressed={filesViewMode === "folder"}
+                >
+                  <LayoutDashboard className="size-4" />
+                  <span className="ml-1">Folder</span>
+                </Button>
+              </div>
+              <div className="flex-1" />
+              {filesViewMode === "list" && (
+                <div className="flex items-center gap-2">
+                  <Select value={listSort} onValueChange={(v) => setListSort(v as typeof listSort)}>
+                    <SelectTrigger className="w-48" aria-label="Sort by">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="updated-desc">Updated (newest)</SelectItem>
+                      <SelectItem value="updated-asc">Updated (oldest)</SelectItem>
+                      <SelectItem value="name-asc">Name (A–Z)</SelectItem>
+                      <SelectItem value="name-desc">Name (Z–A)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select value={listGroup} onValueChange={(v) => setListGroup(v as typeof listGroup)}>
+                    <SelectTrigger className="w-40" aria-label="Group by">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">No grouping</SelectItem>
+                      <SelectItem value="file-type">File type</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+
+            {filesViewMode === "folder" ? (
+              // Folder view: Drive folder trees for My Drive and Shared with me
+              <div className="space-y-6">
+                {driveFoldersLoading ? (
+                  <div className="py-8 text-center text-sm text-muted-foreground">Loading Drive folders…</div>
+                ) : Object.keys(myDriveTree).length > 0 || Object.keys(sharedDriveTree).length > 0 ? (
+                  <>
+                    {Object.entries(myDriveTree).map(([rootName, rootNode]) => (
+                      <DriveFolderTree
+                        key={`mine-${rootName}`}
+                        node={rootNode}
+                        path={rootName}
+                        saved={sortedMine} // Use sortedMine for consistent file data
+                        collections={collections}
+                        onManage={onManage}
+                        onRemove={onRemovePending}
+                        onToggleCollection={toggleCollection}
+                        onChanged={onChanged}
+                        closed={driveFoldersClosed}
+                        onToggle={toggleDriveFolder}
+                      />
+                    ))}
+                    {myDriveUncategorized.length > 0 && (
+                      <section aria-label="My Drive Uncategorized" className="border-t pt-4">
+                        <h4 className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                          Uncategorized ({myDriveUncategorized.length})
+                        </h4>
+                        <ul className="divide-y divide-border/60 overflow-hidden rounded-xl border bg-card/40">
+                          {myDriveUncategorized
+                            .map((id) => sortedMine.find((r) => r.id === id))
+                            .filter((r): r is UploadRow => r !== undefined)
+                            .map(renderFileRow)}
+                        </ul>
+                      </section>
+                    )}
+                    {/* Shared with me section */}
+                    {Object.entries(sharedDriveTree).map(([rootName, rootNode]) => (
+                      <DriveFolderTree
+                        key={`shared-${rootName}`}
+                        node={rootNode}
+                        path={rootName}
+                        saved={sortedShared}
+                        collections={collections}
+                        onManage={onManage}
+                        onRemove={onRemovePending}
+                        onToggleCollection={toggleCollection}
+                        onChanged={onChanged}
+                        closed={driveFoldersClosed}
+                        onToggle={toggleDriveFolder}
+                      />
+                    ))}
+                    {sharedUncategorized.length > 0 && (
+                      <section aria-label="Shared Uncategorized" className="border-t pt-4">
+                        <h4 className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                          Uncategorized ({sharedUncategorized.length})
+                        </h4>
+                        <ul className="divide-y divide-border/60 overflow-hidden rounded-xl border bg-card/40">
+                          {sharedUncategorized
+                            .map((id) => sortedShared.find((r) => r.id === id))
+                            .filter((r): r is UploadRow => r !== undefined)
+                            .map(renderFileRow)}
+                        </ul>
+                      </section>
+                    )}
+                  </>
+                ) : (
+                  <p className="py-8 text-center text-sm text-muted-foreground">
+                    No imported files with Drive folder information found.
+                  </p>
+                )}
+              </div>
+            ) : (
+              // List view: tabs for My files / Shared with me with sorting
+              <Tabs defaultValue="my-files">
+                <TabsList>
+                  <TabsTrigger value="my-files">My files ({mine.length})</TabsTrigger>
+                  <TabsTrigger value="shared-with-me">Shared with me ({shared.length})</TabsTrigger>
+                </TabsList>
+                <TabsContent value="my-files">
+                  {sortedMine.length ? (
+                    <ul className="divide-y divide-border/60 overflow-hidden rounded-xl border bg-card/40">
+                      {sortedMine.map(renderFileRow)}
+                    </ul>
+                  ) : (
+                    <p className="py-6 text-center text-sm text-muted-foreground">No files owned by you match these filters.</p>
+                  )}
+                </TabsContent>
+                <TabsContent value="shared-with-me">
+                  {sortedShared.length ? (
+                    <ul className="divide-y divide-border/60 overflow-hidden rounded-xl border bg-card/40">
+                      {sortedShared.map(renderFileRow)}
+                    </ul>
+                  ) : (
+                    <p className="py-6 text-center text-sm text-muted-foreground">No files shared with you match these filters.</p>
+                  )}
+                </TabsContent>
+              </Tabs>
+            )}
           </TabsContent>
 
           <TabsContent value="collections" className="space-y-4">
@@ -315,67 +549,6 @@ export function ManageFiles({
                   )
                 })}
               </div>
-            )}
-          </TabsContent>
-
-          <TabsContent value="drive-folders" className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-medium">Drive folder structure (imported files only)</h3>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">
-                  Folders reflect current Drive locations. Files moved to unimported folders won't appear here.
-                </span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={fetchDriveFolders}
-                  disabled={driveFoldersLoading}
-                >
-                  <RefreshCw className={cn("size-4", driveFoldersLoading && "animate-spin")} />
-                  Refresh
-                </Button>
-              </div>
-            </div>
-
-            {driveFoldersLoading ? (
-              <div className="py-8 text-center text-sm text-muted-foreground">
-                Loading Drive folders…
-              </div>
-            ) : Object.keys(driveFoldersTree).length > 0 ? (
-              <>
-                {Object.entries(driveFoldersTree).map(([rootName, rootNode]) => (
-                  <DriveFolderTree
-                    key={rootName}
-                    node={rootNode}
-                    path={rootName}
-                    saved={saved}
-                    collections={collections}
-                    onManage={onManage}
-                    onRemove={onRemovePending}
-                    onToggleCollection={toggleCollection}
-                    onChanged={onChanged}
-                    closed={driveFoldersClosed}
-                    onToggle={toggleDriveFolder}
-                  />
-                ))}
-                {uncategorizedIds.length > 0 && (
-                  <section aria-label="Uncategorized" className="border-t pt-4">
-                    <h4 className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                      Uncategorized ({uncategorizedIds.length})
-                    </h4>
-                    <ul className="divide-y divide-border/60 overflow-hidden rounded-xl border bg-card/40">
-                      {uncategorizedIds
-                        .map((id) => saved.find((r) => r.id === id))
-                        .filter((r): r is UploadRow => r !== undefined)
-                        .map(renderFileRow)}
-                    </ul>
-                  </section>
-                )}
-              </>
-            ) : (
-              <p className="py-8 text-center text-sm text-muted-foreground">
-                No imported files with Drive folder information found.
-              </p>
             )}
           </TabsContent>
         </Tabs>
