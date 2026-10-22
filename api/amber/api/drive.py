@@ -13,7 +13,6 @@ from amber import repository
 from amber.api.documents import apply_organization
 from amber.ingest import settings as indexing_settings
 from amber.ingest.pipeline import IndexingError, index_document_content, mark_document_failed
-from amber.models import can_import_folders
 from amber.util import drive, drive_sync
 from amber.util.config import get_settings
 from amber.util.posthog import capture_event, get_posthog_client
@@ -63,37 +62,12 @@ class DriveFolderRequest(BaseModel):
 
 @router.post("/folder-files", dependencies=[CsrfProtected, _picker_limit])
 def list_folder_files(user: CurrentUser, conn: DbDep, req: DriveFolderRequest) -> dict[str, Any]:
-    """The importable files under folders the user picked, subfolders included. The browser then sends them to
-    /import in batches, so a large folder never has to fit in one request."""
-    token = repository.get_token(conn, user["id"])
-    if not token or not can_import_folders(token["scopes"]):
-        raise HTTPException(status_code=409, detail="Reconnect Google Drive to import whole folders.")
-    drive_service = drive.build_drive_service(user["id"], conn)
-    if not drive_service:
-        raise HTTPException(status_code=400, detail="Google Drive is not connected for this user")
-
-    files: list[dict[str, str]] = []
-    skipped: list[str] = []
-    seen: set[str] = set()
-    truncated = False
-    for folder_id in req.folder_ids:
-        if not _DRIVE_ID.match(folder_id):
-            raise HTTPException(status_code=422, detail="Invalid Google Drive folder id")
-        try:
-            found, cut = drive.list_folder_files(drive_service, folder_id, MAX_FOLDER_FILES - len(files))
-        except Exception as exc:
-            log.warning("Listing Drive folder %s failed: %s: %s", folder_id, type(exc).__name__, exc)
-            raise HTTPException(status_code=502, detail="Couldn't list that Google Drive folder. Try again.") from exc
-        truncated = truncated or cut
-        for item in found:
-            if item["id"] in seen:
-                continue
-            seen.add(item["id"])
-            if drive.is_importable(item.get("mimeType", "")):
-                files.append({"id": item["id"], "name": item.get("name", "Untitled")})
-            else:
-                skipped.append(item.get("name", "Untitled"))
-    return {"files": files, "skipped": skipped, "truncated": truncated, "limit": MAX_FOLDER_FILES}
+    """Folder import is disabled. Only drive.file scope is requested (non-restricted).
+    Users can browse folders in the Picker and multi-select files instead."""
+    raise HTTPException(
+        status_code=409,
+        detail="Folder import is not available. Please browse into the folder in the Picker and select the files you want to import."
+    )
 
 
 @router.post("/import", dependencies=[CsrfProtected])

@@ -59,7 +59,6 @@ const SUPPORTED_MIME_TYPES = [
   "application/vnd.google-apps.spreadsheet",
   "application/vnd.google-apps.presentation",
 ]
-const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 
 /** Files sent to /api/drive/import per request, so a large folder never runs into the API's request timeout. */
 const IMPORT_BATCH_SIZE = 5
@@ -97,41 +96,24 @@ type ImportResult = {
   failed?: { title: string; error: string }[]
   drive_sync_warning?: string | null
 }
-type FolderFiles = { files: { id: string; name: string }[]; skipped: string[]; truncated: boolean; limit: number }
 
 function plural(count: number, word: string): string {
   return `${count} ${count === 1 ? word : `${word}s`}`
 }
 
 export function DrivePickerPanel({ onImported }: { onImported: () => void }) {
-  const { connected: driveConnected, can_import_folders: canImportFolders = false } = useSession().drive
+  const { connected: driveConnected } = useSession().drive
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
 
-  /** Expands picked folders into their files, then imports everything in batches. */
+  /** Imports the files the user picked (folders can't be picked with drive.file scope). */
   async function importPicked(docs: PickerDoc[]) {
-    const fileIds = docs.filter((doc) => doc.mimeType !== FOLDER_MIME_TYPE).map((doc) => doc.id)
-    const folderIds = docs.filter((doc) => doc.mimeType === FOLDER_MIME_TYPE).map((doc) => doc.id)
+    const fileIds = docs.map((doc) => doc.id)
     const skipped: string[] = []
     const failed: { title: string; error: string }[] = []
     let imported = 0
     let syncWarning: string | null = null
     try {
-      if (folderIds.length > 0) {
-        const res = await apiPost("/api/drive/folder-files", { folder_ids: folderIds })
-        const folders = (await res.json()) as FolderFiles
-        fileIds.push(...folders.files.map((file) => file.id).filter((id) => !fileIds.includes(id)))
-        skipped.push(...folders.skipped)
-        if (folders.truncated) {
-          toast.warning(`Only the first ${folders.limit} files will be imported`, {
-            description: "Pick a smaller folder, or its subfolders one at a time, to import the rest.",
-          })
-        }
-        if (fileIds.length === 0) {
-          toast.info("No files Amber can index were found in that folder")
-        }
-      }
-
       setProgress({ done: 0, total: fileIds.length })
       for (let start = 0; start < fileIds.length; start += IMPORT_BATCH_SIZE) {
         const batch = fileIds.slice(start, start + IMPORT_BATCH_SIZE)
@@ -143,7 +125,7 @@ export function DrivePickerPanel({ onImported }: { onImported: () => void }) {
           failed.push(...(data.failed ?? []))
           syncWarning = data.drive_sync_warning ?? syncWarning
         } catch (err) {
-          // A failed batch shouldn't stop the rest of the folder.
+          // A failed batch shouldn't stop the rest.
           const error = err instanceof Error ? err.message : "Failed to import files"
           failed.push(...batch.map((id) => ({ title: id, error })))
         }
@@ -180,20 +162,20 @@ export function DrivePickerPanel({ onImported }: { onImported: () => void }) {
       const [picker, tokenRes] = await Promise.all([loadPicker(), apiPost("/api/drive/picker-token")])
       const token = (await tokenRes.json()) as PickerToken
 
-      // Folders are always shown so people can browse into them; they're selectable once folder import is granted.
-      const mimeTypes = [...SUPPORTED_MIME_TYPES, FOLDER_MIME_TYPE].join(",")
+      // Show only files (not folders) in the picker. Folders are still shown for navigation via setIncludeFolders(true).
+      const mimeTypes = SUPPORTED_MIME_TYPES.join(",")
       const view = (label: string) =>
         new picker.DocsView(picker.ViewId.DOCS)
           .setLabel(label)
           .setMode(picker.DocsViewMode.LIST)
-          .setIncludeFolders(true)
-          .setSelectFolderEnabled(canImportFolders)
+          .setIncludeFolders(true)      // allows browsing into folders
+          .setSelectFolderEnabled(false) // folder selection requires drive.readonly scope (not requested)
           .setMimeTypes(mimeTypes)
-      const myDrive = view("My Drive").setParent("root") // opens at the top of My Drive, folder by folder
+      const myDrive = view("My Drive").setParent("root")
       const sharedWithMe = view("Shared with me").setOwnedByMe(false)
 
       new picker.PickerBuilder()
-        .setTitle(canImportFolders ? "Choose files or folders for Amber" : "Choose files for Amber")
+        .setTitle("Choose files for Amber")
         .addView(myDrive)
         .addView(sharedWithMe)
         .enableFeature(picker.Feature.MULTISELECT_ENABLED)
@@ -222,10 +204,10 @@ export function DrivePickerPanel({ onImported }: { onImported: () => void }) {
         <span className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-info/12 text-info">
           <FolderOpen className="size-6" />
         </span>
-        <p className="font-medium">Choose files or folders from Google Drive</p>
+        <p className="font-medium">Choose files from Google Drive</p>
         <p className="mt-1 max-w-md text-sm text-muted-foreground">
-          Browse your Drive folder by folder. Pick a folder to import every supported file inside it, subfolders
-          included. Their Drive sharing decides who can find them in Amber.
+          Browse your Drive folder by folder and select the files you want. Multi-select is supported.
+          Their Drive sharing decides who can find them in Amber.
         </p>
         <Button className="mt-4" disabled={!driveConnected || busy} onClick={openPicker}>
           {busy && <Loader2 className="animate-spin" />}
@@ -233,12 +215,7 @@ export function DrivePickerPanel({ onImported }: { onImported: () => void }) {
         </Button>
         {!driveConnected && (
           <a href={googleSignInUrl("/upload", { reconnect: true })} className="mt-2 text-xs text-primary underline-offset-4 hover:underline">
-            Reconnect Google Drive first
-          </a>
-        )}
-        {driveConnected && !canImportFolders && (
-          <a href={googleSignInUrl("/upload", { reconnect: true })} className="mt-2 text-xs text-primary underline-offset-4 hover:underline">
-            Reconnect Google Drive to import whole folders
+            Connect Google Drive first
           </a>
         )}
       </div>

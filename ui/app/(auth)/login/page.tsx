@@ -91,8 +91,8 @@ export default async function LoginPage({ searchParams }: PageProps<"/login">) {
         </div>
 
         <p className="mt-6 text-center text-xs text-muted-foreground">
-          Amber asks for read-only access to your Drive so it can import whole folders you pick. It only indexes files
-          and folders you choose, and it changes only files you pick or that it saved for you. You can disconnect Drive
+          Amber asks for access to your Drive files so you can pick them to import. It only indexes files
+          you choose, and it changes only files you pick or that it saved for you. You can disconnect Drive
           anytime from your profile.
         </p>
         <p className="mt-3 text-center text-xs text-muted-foreground">

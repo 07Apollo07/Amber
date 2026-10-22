@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from amber import repository
-from amber.models import can_import_folders, can_manage_drive_sharing, drive_connected
+from amber.models import can_manage_drive_sharing, drive_connected
 from amber.util import audit, drive_sync, firebase, google_oauth
 from amber.util.config import Settings
 from amber.util.crypto import decrypt_token, encrypt_token
@@ -237,10 +237,10 @@ def google_callback(
         repository.save_token(conn, user["id"], encrypted=blob, key_version=key_version, scopes=tokens["scopes"])
     elif (
         stored is not None
-        and not (can_manage_drive_sharing(stored["scopes"]) and can_import_folders(stored["scopes"]))
+        and not can_manage_drive_sharing(stored["scopes"])
         and not pending["consent"]
     ):
-        # Signed in before Amber asked for its current Drive scopes (drive.file, drive.readonly). The stored refresh
+        # Signed in before Amber asked for its current Drive scope (drive.file). The stored refresh
         # token still carries the old ones, so ask again with prompt=consent to get a new one. Nothing is saved until
         # that round completes.
         conn.rollback()

@@ -8,8 +8,8 @@ DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 LEGACY_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
 # Read-only access to the whole Drive, so a picked folder's files (which drive.file can't see) can be imported.
-# Google treats it as a restricted scope. Only folder import and Drive sync use it; agent tools stay on drive.file.
-DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+# Google treats it as a restricted scope. NOT REQUESTED ANYMORE — folder import is disabled.
+# DRIVE_READONLY_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 
 
 def can_manage_drive_sharing(scopes: str) -> bool:
@@ -24,6 +24,8 @@ def drive_connected(has_refresh_token: bool, scopes: str) -> bool:
 
 
 def can_import_folders(scopes: str) -> bool:
-    """Listing and reading a picked folder's files needs drive.readonly (or the legacy full drive scope)."""
-    granted = (scopes or "").split()
-    return DRIVE_READONLY_SCOPE in granted or LEGACY_DRIVE_SCOPE in granted
+    """Listing and reading a picked folder's files needs drive.readonly (or the legacy full drive scope).
+
+    Returns False because drive.readonly scope is no longer requested. Folder import is disabled.
+    Users can still browse folders in the Picker and multi-select files."""
+    return False

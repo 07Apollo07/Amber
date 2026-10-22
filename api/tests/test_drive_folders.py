@@ -2,7 +2,7 @@ import pytest
 from fastapi import HTTPException
 
 from amber.api import drive as drive_api
-from amber.models import DRIVE_READONLY_SCOPE, DRIVE_SCOPE
+from amber.models import DRIVE_SCOPE
 from amber.util import drive
 
 FOLDER = drive.FOLDER_MIME
@@ -73,29 +73,10 @@ def test_importable_types(mime, expected):
     assert drive.is_importable(mime) is expected
 
 
-def test_folder_files_needs_drive_readonly(monkeypatch):
+def test_folder_files_disabled(monkeypatch):
+    """The /folder-files endpoint is disabled since only drive.file scope is requested."""
     monkeypatch.setattr(drive_api.repository, "get_token", lambda *_: {"scopes": f"openid {DRIVE_SCOPE}"})
     with pytest.raises(HTTPException) as exc:
         drive_api.list_folder_files({"id": "u"}, object(), drive_api.DriveFolderRequest(folder_ids=["root"]))
-    assert exc.value.status_code == 409 and "Reconnect" in exc.value.detail
-
-
-def test_folder_files_splits_importable_and_skipped(monkeypatch):
-    monkeypatch.setattr(
-        drive_api.repository, "get_token", lambda *_: {"scopes": f"openid {DRIVE_SCOPE} {DRIVE_READONLY_SCOPE}"}
-    )
-    service = FakeService({"f1": [[item("a"), item("img", "image/png")]], "f2": [[item("a"), item("b", DOC)]]})
-    monkeypatch.setattr(drive_api.drive, "build_drive_service", lambda *_: service)
-    result = drive_api.list_folder_files({"id": "u"}, object(), drive_api.DriveFolderRequest(folder_ids=["f1", "f2"]))
-    assert [f["id"] for f in result["files"]] == ["a", "b"]  # a file in both folders is imported once
-    assert result["skipped"] == ["img.name"] and result["truncated"] is False
-
-
-def test_folder_files_rejects_ids_that_could_break_the_query(monkeypatch):
-    monkeypatch.setattr(
-        drive_api.repository, "get_token", lambda *_: {"scopes": f"{DRIVE_SCOPE} {DRIVE_READONLY_SCOPE}"}
-    )
-    monkeypatch.setattr(drive_api.drive, "build_drive_service", lambda *_: FakeService({}))
-    with pytest.raises(HTTPException) as exc:
-        drive_api.list_folder_files({"id": "u"}, object(), drive_api.DriveFolderRequest(folder_ids=["x' or '1'='1"]))
-    assert exc.value.status_code == 422
+    assert exc.value.status_code == 409
+    assert "Folder import is not available" in exc.value.detail

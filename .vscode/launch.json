@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: API main.py",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/api/main.py",
+      "python": "${workspaceFolder}/api/.venv/Scripts/python.exe",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}/api",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/api"
+      }
+    }
+  ]
+}
