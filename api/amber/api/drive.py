@@ -72,20 +72,6 @@ def get_imported_folders(user: CurrentUser, conn: DbDep) -> dict[str, Any]:
     repository.set_app_user_context(conn, user["email"], user.get("domain"))
 
     docs = repository.get_user_documents_with_drive_ids(conn, user["id"])
-    print(f"[imported-folders] User {user['id']} has {len(docs)} docs with drive_file_id")
-    for d in docs:
-        print(f"[imported-folders]   doc: id={d['id']} drive_file_id={d['drive_file_id']} title={d['title']}")
-
-    # Debug: also check what list_accessible_documents returns
-    from amber import repository as repo_module
-    accessible = repo_module.list_accessible_documents(
-        conn, user_id=user["id"], user_email=user["email"], user_domain=user.get("domain")
-    )
-    print(f"[imported-folders] list_accessible_documents returns {len(accessible)} docs")
-    for a in accessible:
-        if a.get("drive_file_id"):
-            print(f"[imported-folders]   accessible: id={a['id']} drive_file_id={a['drive_file_id']} title={a['title']} owner_id={a.get('owner_id')} is_owner={a.get('is_owner')}")
-
     if not docs:
         return {"tree": {}, "uncategorized": []}
 
@@ -112,7 +98,6 @@ def get_imported_folders(user: CurrentUser, conn: DbDep) -> dict[str, Any]:
         )
 
     batch.execute()
-    print(f"[imported-folders] Batch results (parents per doc): {results}")
 
     # Resolve folder paths (with caching to avoid duplicate calls)
     folder_cache: dict[str, dict] = {}
@@ -159,13 +144,10 @@ def get_imported_folders(user: CurrentUser, conn: DbDep) -> dict[str, Any]:
             paths = [resolve_folder_path(p) for p in parents]
             if paths:
                 file_to_paths[doc_id] = paths
-    print(f"[imported-folders] file_to_paths: {file_to_paths}")
 
     # Build tree structure
     tree = _build_folder_tree(file_to_paths)
     uncategorized = [doc["id"] for doc in docs if doc["id"] not in file_to_paths]
-    print(f"[imported-folders] tree: {tree}")
-    print(f"[imported-folders] uncategorized: {uncategorized}")
 
     return {"tree": tree, "uncategorized": uncategorized}
 

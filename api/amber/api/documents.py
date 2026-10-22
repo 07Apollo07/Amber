@@ -131,9 +131,6 @@ def list_my_documents(user: CurrentUser, conn: DbDep, settings: SettingsDep) -> 
     rows = repository.list_accessible_documents(
         conn, user_id=user["id"], user_email=user["email"], user_domain=user["domain"]
     )
-    print(f"[documents/mine] User {user['id']} ({user['email']}) got {len(rows)} rows from list_accessible_documents")
-    for r in rows:
-        print(f"[documents/mine]   id={r['id']} title={r['title']} drive_file_id={r.get('drive_file_id')} owner_id={r.get('owner_id')} is_owner={r.get('is_owner')}")
     drive_service = drive.build_drive_service(user["id"], conn)
     for row in rows:
         if row.get("drive_owner_email") or not row.get("drive_file_id") or drive_service is None:
