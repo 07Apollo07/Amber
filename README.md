@@ -62,10 +62,13 @@ Company knowledge sits in Drive folders, shared docs, spreadsheets and PDFs. Fin
 - **Model choice:** Gemini by default; a model selector appears when a [LiteLLM](https://github.com/BerriAI/litellm) endpoint is configured.
 
 **Documents**
-- Drag-and-drop upload, or pick files with the Google Drive Picker.
+- Drag-and-drop upload, or pick files with the Google Drive Picker (browse into folders and multi-select files; selecting a whole folder isn't supported under `drive.file`).
 - Google Docs, Sheets and Slides are exported and indexed alongside PDFs, Office files and text.
 - Collections and tags, plus sharing on upload (private, specific people, or your whole domain).
 - **Live sync with Drive:** permission changes are applied through Drive change notifications, and edited files are re-indexed after a quiet period.
+
+**Voice**
+- **Opal**, a voice sidekick built on Gemini Live, talks through a question with you. It can suggest text for the chat box, but it can't send requests or approve changes.
 
 **An agent that works in your Workspace**
 - Searches indexed documents and reads files, Docs and Sheets.
@@ -77,7 +80,8 @@ Company knowledge sits in Drive folders, shared docs, spreadsheets and PDFs. Fin
 - Users and roles (Admin or Member), access and audit logs, analytics, and indexing settings.
 - Documents management across the organization.
 - Sharing is managed in Drive, so admins don't maintain a second set of permissions.
-- An append-only audit log of access, searches, sharing changes and admin actions.
+- An append-only audit log of access, searches, sharing changes and admin actions, with CSV export.
+- Query traces and analytics, so you can see how each answer was built.
 
 ## Security model
 
@@ -85,10 +89,10 @@ Company knowledge sits in Drive folders, shared docs, spreadsheets and PDFs. Fin
 - **Per-document checks everywhere.** Opening a document, previewing a source or letting the agent read a file all go through the same access list, which guards against guessing IDs.
 - **No tokens in the browser.** Google sign-in runs server-side (PKCE, state, nonce). The session is an HttpOnly Firebase session cookie, with CSRF protection on every state-changing request.
 - **Refresh tokens are encrypted** with Cloud KMS (AES-256-GCM, bound to the user).
-- **Least-privilege Drive access.** Amber requests only the `drive.file` scope: files you pick or that Amber creates, not your whole Drive.
+- **Least-privilege Drive access.** Amber requests only the `drive.file` scope: files you pick or that Amber creates, not your whole Drive. It doesn't use a restricted scope, so it needs no Google security assessment.
 - **Roles live in Postgres.** Client claims are never trusted, and sessions can be revoked immediately.
 
-More detail is in [`api/README.md`](api/README.md) and [`PLAN.md`](PLAN.md).
+The reasoning behind each choice is in [`DECISION.MD`](DECISION.MD). More detail is in [`api/README.md`](api/README.md) and [`PLAN.md`](PLAN.md).
 
 ## How to use Amber
 
@@ -107,9 +111,10 @@ More detail is in [`api/README.md`](api/README.md) and [`PLAN.md`](PLAN.md).
 | `ui/` | Next.js 16, React, Tailwind, AI Elements, pnpm. Proxies `/api/*` to the API so cookies stay first-party |
 | `api/` | FastAPI (Python 3.12), LangChain / LangGraph, psycopg2 with hand-written SQL |
 | Data | Postgres with pgvector and full-text search |
-| Models | Gemini via the Google AI API (`gemini-embedding-001` embeddings at 1536 dimensions) |
+| Models | Gemini via the Google AI API (`gemini-embedding-001` embeddings at 1536 dimensions); Gemini Live for Opal voice |
 | Identity | Firebase Auth with Google sign-in |
 | Hosting | Google Cloud Run, Cloud SQL, Secret Manager, Cloud KMS, Cloud Scheduler |
+| Observability | PostHog product analytics and logs (optional) |
 
 **How a Drive edit reaches the index**
 
@@ -144,17 +149,19 @@ pnpm dev                    # http://localhost:3000
 
 Register `http://localhost:3000/api/auth/google/callback` as an authorized redirect URI on your OAuth client, and enable the Google Drive, Docs, Sheets and Picker APIs in your Cloud project.
 
-Run the API tests (no database or Google access needed):
+Run the API tests (196 tests; no database or Google access needed):
 
 ```bash
 cd api && uv run pytest
 ```
 
+To score the agent's answers against a golden dataset with RAGAS (needs live model access), see `api/eval/run_ragas.py`.
+
 ## Deploying to Google Cloud
 
 `deploy/cloudrun.sh` builds both services and deploys them to Cloud Run. Copy `deploy/cloudrun.env.example` to `deploy/cloudrun.env`, then run `setup`, `secrets` and `deploy` in that order. See [`DEPLOY.MD`](DEPLOY.MD) for the full walkthrough.
 
-For Drive sync to work in production, create two Cloud Scheduler jobs that send a `POST` with the `X-Amber-Drive-Sync-Secret` header:
+The script does not create Cloud Scheduler jobs. For Drive sync to work in production, create two that send a `POST` with the `X-Amber-Drive-Sync-Secret` header (the value of the `amber-drive-sync-secret` secret):
 
 | Job | Schedule | Endpoint |
 |---|---|---|
@@ -169,7 +176,9 @@ Tune the quiet period with `AMBER_DRIVE_REINDEX_QUIET_SECONDS` (default 300) and
 api/        FastAPI backend: auth, ingestion, retrieval, agent, Drive sync
 ui/         Next.js web app
 deploy/     Cloud Run deployment script and config template
+api/eval/   RAGAS evaluation of the agent
 PLAN.md     Product and implementation plan
+DECISION.MD Design decisions, trade-offs and known gaps
 DEPLOY.MD   Google Cloud deployment guide
 UNDERSTAND.MD  A guided reading order for the code
 ```

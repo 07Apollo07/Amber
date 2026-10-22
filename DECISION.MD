@@ -106,10 +106,11 @@ This file records the main design decisions behind Amber: what we chose, why, an
 
 **Roles live in Postgres, not in tokens.** `require_admin` reads `users.role`, and client claims are never trusted. The first admins come from `BOOTSTRAP_ADMIN_EMAILS`, and only when that account is first created, so the variable can't be used later to promote an existing account.
 
-**Narrow Drive scope.** Amber asks for `drive.file`: files the user picks in the Google Picker, plus files and folders Amber creates.
-- It is least privilege, and it avoids Google's restricted-scope security assessment.
-- Picker tokens are minted narrowed to `drive.file`, even if the stored grant is broader (`drive.mint_picker_token`).
-- Indexing the whole Drive (`drive.readonly`) is deferred until Google's verification is done.
+**Narrow Drive scope.** Amber asks for `drive.file` and nothing broader (`SCOPES` in `util/google_oauth.py`): files the user picks in the Google Picker, plus files and folders Amber creates.
+- It is least privilege, and it is not a Google *restricted* scope, so no CASA security assessment is needed.
+- Picker tokens are minted narrowed to `drive.file`, even if the stored grant is broader (`drive.mint_picker_token`). The agent's Workspace tools use only this scope too.
+- **No whole-folder import.** `drive.file` can't list the files inside a folder, so the Picker lets users browse into folders and multi-select files, but not select a folder (`setSelectFolderEnabled(false)`). An earlier version also requested `drive.readonly` for folder import. That scope was removed. `POST /api/drive/folder-files` now always returns 409, and `models.can_import_folders` always returns False. A user who signed in under the older grant still holds it until they reconnect.
+- Indexing the whole Drive (`drive.readonly`) would need Google's verification and a security assessment first, so it is deferred.
 
 ---
 
@@ -125,7 +126,7 @@ This file records the main design decisions behind Amber: what we chose, why, an
 
 **Why.** A database dump or a SQL-injection read gives an attacker nothing usable without access to the KMS key. KMS access is a separate IAM permission held only by the API's service account.
 
-**Secrets.** OAuth client secret, Firebase key, Gemini key, cookie key, database DSN and the Drive sync secret all live in **Secret Manager**. They're mounted into Cloud Run at deploy time and never committed. The API authenticates to Google with its service account (Application Default Credentials), not with key files.
+**Secrets.** OAuth client secret, Firebase key, Gemini key, cookie key, database DSN, the Drive sync secret, the LiteLLM key and the PostHog project token all live in **Secret Manager**. They're mounted into Cloud Run at deploy time and never committed. The API authenticates to Google with its service account (Application Default Credentials), not with key files.
 
 ---
 
@@ -222,7 +223,7 @@ This file records the main design decisions behind Amber: what we chose, why, an
 - **Models.** Gemini through the Google AI API on the **paid tier**, so prompts and documents aren't used for training. Answers use `gemini-2.5-flash` by default; embeddings use `gemini-embedding-001` at 1536 dimensions.
 - **Swappable model provider.** An optional LiteLLM endpoint lets the chat use other models. The requested model is validated against LiteLLM's model list.
 - **Traceability.** Every chat turn is recorded in `query_traces`: the question, each tool the agent ran (shortened inputs, outcome, timing), the sources found (document metadata and match scores), model, tokens and latency. Passage text and Amber's answer are never stored, so the admin Query traces tab explains an answer without becoming a way to read other people's documents.
-- **Ingestion.** Content is checked by type and size (admin-configurable limit, 30 MB today). Google Docs, Sheets and Slides are exported to Office formats so they parse like uploads. Desktop uploads are saved to the uploader's Drive (`Amber Uploads` folder), so Drive becomes the file's home and the source of its sharing.
+- **Ingestion.** Content is checked by type and size (admin-configurable limit; the default is 50 MB and the form accepts up to 200 MB, but Cloud Run and the Next.js proxy cap request bodies at about 32 MB, so larger files fail whatever the setting says; see §14). Google Docs, Sheets and Slides are exported to Office formats so they parse like uploads. Desktop uploads are saved to the uploader's Drive (`Amber Uploads` folder), so Drive becomes the file's home and the source of its sharing.
 
 ---
 
@@ -238,6 +239,7 @@ This file records the main design decisions behind Amber: what we chose, why, an
 - Sheets has no equivalent, so Amber re-checks the workbook timestamp and the affected cells just before writing. A concurrent edit could still race that last check.
 - Public-link sharing isn't offered.
 - If durable checkpointing isn't available, write tools are disabled entirely.
+- **Opal, the voice sidekick, can't change anything.** The API opens the Gemini Live session itself (`/api/agent/live`, with an `Origin` check), so the Gemini key never reaches the browser. The browser's chat context is treated as untrusted reference material, and voice suggestions only fill the chat composer. Workspace changes still need an approval in the chat. Sessions are capped (`AMBER_GEMINI_LIVE_MAX_SESSION_SECONDS`, default 30 minutes, below the Cloud Run timeout).
 - **Generative UI is limited to app-owned components** (charts, tables, cards). The renderer never executes model-generated code.
 
 **Why.** An LLM can be wrong or manipulated by content inside a document (prompt injection). Requiring approval keeps a person responsible for every change to company data.
@@ -246,15 +248,20 @@ This file records the main design decisions behind Amber: what we chose, why, an
 
 ## 12. Hosting and deployment
 
-- **Two Cloud Run services:** `amber-web` (Next.js) and `amber-api` (FastAPI). The web service forwards `/api/*` to the API. Both run with `--min-instances 0`.
+- **Two Cloud Run services:** `amber-web` (Next.js) and `amber-api` (FastAPI). The web service forwards `/api/*` to the API. Both run with `--min-instances 0` and `--timeout 3600`, because Opal voice sessions are WebSockets and Cloud Run closes a WebSocket at the request timeout. The API runs with `--concurrency 10` and `--max-instances 3`, which keeps the number of database connections small.
 - **Separate service accounts** (`amber-api@…`, `amber-web@…`). Only the API's account can reach Cloud SQL, Firebase Admin, the KMS key and its secrets.
 - **Cloud SQL** connection uses the Cloud SQL connector (`--add-cloudsql-instances`). Cloud Run is placed in the same region as the database.
-- **Reproducible deploys.** `deploy/cloudrun.sh` builds both images with Cloud Build, refuses to deploy if any required secret has no value, and sets the secret list explicitly with `--set-secrets` on each deploy.
+- **Containers.** Both services have a Dockerfile (`api/Dockerfile`, `ui/Dockerfile`) and run as non-root users. The web image is built with `ui/cloudbuild.yaml`, because the API address is baked into the `/api` rewrite at build time.
+- **Reproducible deploys.** `deploy/cloudrun.sh` (`setup`, `secrets`, `deploy`) builds both images with Cloud Build, refuses to deploy if any required secret has no value, and sets the secret list explicitly with `--set-secrets` on each deploy.
+- **Cloud Scheduler jobs are created by hand.** `deploy/cloudrun.sh` doesn't create them. The two jobs are listed in `README.md` and `DEPLOY.MD` §9.
+- **Custom domain without a load balancer.** The app is served at `amber.kathalyst.ai` through `PUBLIC_BASE_URL`; OAuth, cookies and the WebSocket origin check are pinned to that address. Google Search Console ownership is proved with the verification meta tag in `ui/app/layout.tsx` (Next.js `metadata.verification`).
 - **No load balancer yet.** It is deferred until there is a custom domain and paying customers. The path to it (global HTTPS load balancer plus Cloud Armor) changes only the front door.
 
 ---
 
-## 13. Auditing and abuse protection
+## 13. Auditing, analytics and abuse protection
+
+- **Product analytics and logs (optional).** PostHog is initialized only when `AMBER_POSTHOG_API_KEY` and `AMBER_POSTHOG_HOST` are set. It records a small set of events (sign-up, conversation created or deleted, Opal session started, admin user changes, Drive permission syncs, index failures) with IDs, counts and short labels as properties, and exception autocapture is on. Operational logs are exported over OTLP from a dedicated logger that only carries purpose-written messages. In dev, a missing key fails start-up on purpose, so events aren't silently lost.
 
 - **Audit log.** Sign-ins, sign-outs, Drive connections and disconnections, imports, sharing changes and admin actions are written to `audit_log` in the **same transaction** as the action, so an action and its audit record commit together or not at all. The table is append-only for the app role (§3).
 - **Rate limiting.** Fixed-window limits per client IP on authentication and Picker endpoints (`util/ratelimit.py`). These are in memory per instance and approximate under concurrency, which is acceptable for a rate limit. Cloud Armor is the planned global layer.
@@ -277,4 +284,8 @@ These are places where the code doesn't yet fully match the decisions above. Eac
 | Rate limits are per instance | Limits multiply with the number of instances | Cloud Armor rate rules at the load balancer |
 | The "N results hidden because of access" count (`count_hidden_chunks`) isn't wired into answers | No user-visible signal that results were filtered | Call it from search and show it in the trace panel |
 | Only `user` and `domain` Drive principals are mapped | Files shared through Google Groups or shared drives may be under-shared in Amber (safe, but incomplete) | Resolve group membership through the Admin SDK |
+| Disabled folder-import code is still in the repo (`/api/drive/folder-files`, `list_folder_files`, `can_import_folders`, their tests and stale comments) | Dead code that mentions a scope Amber no longer asks for | Delete it together |
+| Upload limit is inconsistent: default 50 MB, form allows 200 MB, real ceiling about 32 MB | Admins can set a value that can't work, and the failure looks like a proxy error | Lower `LIMITS` in `api/amber/ingest/settings.py` to the real ceiling, or build the direct-to-Cloud-Storage upload (`DEPLOY.MD` §3) |
+| Cloud Scheduler jobs aren't created by `deploy/cloudrun.sh` | A fresh deploy has no re-indexing and no watch renewal until someone adds them | Add a `schedulers` step to the script |
+| The tiktoken vocabulary is downloaded at runtime | The first chunking on a cold instance is slow or fails without network | Download it in the Docker build and set `TIKTOKEN_CACHE_DIR` |
 | Webhooks need a public HTTPS `AMBER_PUBLIC_BASE_URL` | Drive sync can't run on plain `localhost` | Use a tunnel for local testing (documented in the README) |
