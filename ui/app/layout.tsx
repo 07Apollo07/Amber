@@ -12,6 +12,7 @@ const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"]
 export const metadata: Metadata = {
   title: { default: "Amber", template: "%s · Amber" },
   description: "Ask questions across your company's documents and Google Drive.",
+  verification: { google: "FWNIAMZ_vZoLvOGxuXJ8HIpX-jGx0XMUlLLsuc0TET0" },
 }
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {
