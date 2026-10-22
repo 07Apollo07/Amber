@@ -1,12 +1,16 @@
 """Shared PostHog client lifecycle for the FastAPI application."""
 
 import atexit
+import logging
+from typing import Any
 
 from fastapi import HTTPException, Request
 from posthog import Posthog
 from starlette.concurrency import run_in_threadpool
 
 from amber.util.config import Settings
+
+log = logging.getLogger(__name__)
 
 _posthog_client: Posthog | None = None
 
@@ -39,6 +43,23 @@ def initialize_posthog(settings: Settings) -> Posthog | None:
 def get_posthog_client() -> Posthog | None:
     """Return the process-wide client after FastAPI lifespan startup."""
     return _posthog_client
+
+
+def capture_event(name: str, distinct_id: Any = None, **properties: Any) -> None:
+    """Send one product-analytics event; a no-op without a client, and it never raises into the request.
+
+    Inside an HTTP request the middleware has already identified the user, so `distinct_id` can be left out.
+    WebSockets, worker threads and scheduler-driven jobs have no such context and must pass it."""
+    client = _posthog_client
+    if client is None:
+        return
+    try:
+        if distinct_id is None:
+            client.capture(name, properties=properties)
+        else:
+            client.capture(name, distinct_id=str(distinct_id), properties=properties)
+    except Exception:
+        log.warning("Could not send PostHog event %s", name, exc_info=True)
 
 
 class PostHogRequestContextMiddleware:

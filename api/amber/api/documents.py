@@ -13,7 +13,7 @@ from amber import repository
 from amber.ingest import settings as indexing_settings
 from amber.ingest.pipeline import process_document_upload
 from amber.util import drive, drive_sync
-from amber.util.posthog import get_posthog_client
+from amber.util.posthog import capture_event, get_posthog_client
 from amber.util.posthog_logs import posthog_log
 from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep
 
@@ -341,6 +341,7 @@ def upload_document(
                 "document_uploaded",
                 properties={
                     "mime_type": mime_type,
+                    "chunk_count": result.get("chunks_count"),
                     "file_size_bytes": len(file_bytes),
                     "sharing_option": access[0],
                     "additional_member_count": len(access[1]) - 1,
@@ -363,6 +364,12 @@ def upload_document(
         return result
     except Exception as exc:
         conn.rollback()
+        capture_event(
+            "document_upload_failed",
+            mime_type=mime_type,
+            file_size_bytes=len(file_bytes),
+            error_type=type(exc).__name__,
+        )
         posthog_log.error(
             "Document upload failed",
             extra={
@@ -380,6 +387,7 @@ def delete_document_endpoint(user: CurrentUser, conn: DbDep, document_id: uuid.U
     """Deletes a document and its chunks."""
     doc = _require_owned(conn, user, document_id)  # only the owner can delete, however many people can see it
 
+    chunk_count = repository.count_chunks_for_document(conn, document_id)
     repository.delete_chunks_for_document(conn, document_id)
     repository.delete_document(conn, document_id)
 
@@ -395,5 +403,8 @@ def delete_document_endpoint(user: CurrentUser, conn: DbDep, document_id: uuid.U
     conn.commit()
     client = get_posthog_client()
     if client:
-        client.capture("document_deleted", properties={"origin": doc["origin"]})
+        client.capture(
+            "document_deleted",
+            properties={"origin": doc["origin"], "chunk_count": chunk_count, "file_type": doc.get("file_type")},
+        )
     return {"success": True, "document_id": str(document_id)}

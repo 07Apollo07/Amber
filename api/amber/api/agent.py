@@ -7,6 +7,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
@@ -24,7 +25,7 @@ from amber.agent.graph import create_agent_graph, create_posthog_callback, get_a
 from amber.agent.trace import TurnTrace
 from amber.util import audit, db
 from amber.util.config import Settings
-from amber.util.posthog import get_posthog_client
+from amber.util.posthog import capture_event, get_posthog_client
 from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep, cookie_names, verified_session
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
@@ -262,25 +263,43 @@ async def live_agent(websocket: WebSocket) -> None:
     active[user_key] = active.get(user_key, 0) + 1
 
     await websocket.accept()
+    session_started = time.monotonic()
+    session_stats: dict[str, Any] = {"turns": 0, "tool_calls": 0}
+    end_reason = "closed"
+    capture_event("opal_session_started", user_key, voice=voice.voice, model=settings.gemini_live_model)
     try:
         # The admin's limit applies, but never above the server's own cap.
         limit = min(voice.max_session_minutes * 60, settings.gemini_live_max_session_seconds)
-        await asyncio.wait_for(_run_live_session(websocket, settings, str(user["id"]), voice.voice), timeout=limit)
+        await asyncio.wait_for(
+            _run_live_session(websocket, settings, str(user["id"]), voice.voice, session_stats), timeout=limit
+        )
     except TimeoutError:
+        end_reason = "time_limit"
         await _close_live(websocket, 1000, "Voice session time limit reached")
     except _LiveSessionEnded as ended:
+        end_reason = "browser_ended"
         if str(ended):
             log.info("Opal Live session ended by browser: %s", ended)
         await _close_live(websocket, 1008 if str(ended) else 1000, str(ended)[:120])
     except WebSocketDisconnect:
+        end_reason = "disconnected"
         log.info("Opal Live WebSocket disconnected")
     except Exception:
+        end_reason = "error"
         log.exception("Opal Live session failed")
         await _send_live(websocket, {"type": "error", "message": "The voice service is unavailable."})
         await _close_live(websocket, 1011, "Live voice connection failed")
     else:
         await _close_live(websocket, 1000, "")
     finally:
+        capture_event(
+            "opal_session_ended",
+            user_key,
+            end_reason=end_reason,
+            duration_seconds=round(time.monotonic() - session_started, 1),
+            turn_count=session_stats["turns"],
+            tool_call_count=session_stats["tool_calls"],
+        )
         active[user_key] -= 1
         if active[user_key] <= 0:
             active.pop(user_key, None)
@@ -314,8 +333,13 @@ async def _receive_live(websocket: WebSocket) -> dict[str, Any]:
 
 
 async def _run_live_session(
-    websocket: WebSocket, settings: Settings, user_id: str, voice: str | None = None
+    websocket: WebSocket,
+    settings: Settings,
+    user_id: str,
+    voice: str | None = None,
+    stats: dict[str, Any] | None = None,
 ) -> None:
+    stats = stats if stats is not None else {"turns": 0, "tool_calls": 0}
     try:
         first = await asyncio.wait_for(_receive_live(websocket), timeout=_LIVE_START_TIMEOUT_SECONDS)
     except TimeoutError as exc:
@@ -344,6 +368,7 @@ async def _run_live_session(
     def capture_turn() -> None:
         if not turn:
             return
+        stats["turns"] += 1
         posthog_client = get_posthog_client()
         if posthog_client is not None:
             output_content: list[dict[str, Any]] = []
@@ -449,6 +474,7 @@ async def _run_live_session(
                             elif event["type"] == "tool_call":
                                 begin_turn()
                                 turn["tool_calls"].append(event["name"])
+                                stats["tool_calls"] += 1
                             elif event["type"] == "turn_complete":
                                 capture_turn()
                             await websocket.send_text(json.dumps(event))
@@ -584,6 +610,13 @@ async def stream_agent_v2(
     )
     if conversation is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    # ensure_agent_conversation doesn't say whether it inserted, so a row created moments ago counts as new.
+    created_at = conversation.get("created_at")
+    is_new_conversation = (
+        body.decision is None
+        and isinstance(created_at, datetime)
+        and (datetime.now(UTC) - created_at).total_seconds() < 5
+    )
 
     if body.decision is None and body.collection_id is not None:
         collection = repository.get_accessible_collection(
@@ -666,6 +699,8 @@ async def stream_agent_v2(
     posthog_callback = create_posthog_callback(str(user["id"]), thread_id, str(uuid.uuid4()))
     if posthog_callback is not None:
         config["callbacks"] = [posthog_callback]
+    if is_new_conversation:
+        capture_event("conversation_created", user["id"], conversation_id=thread_id, surface="chat")
     loop = asyncio.get_running_loop()
 
     def save_trace(outcome: dict[str, Any]) -> None:
@@ -695,6 +730,23 @@ async def stream_agent_v2(
                         detail={**approval_detail, "trace_id": str(trace["id"])},
                     )
                 trace_conn.commit()
+            # Runs in a worker thread, so the user has to be named explicitly.
+            capture_event(
+                "chat_message_sent" if approval_detail is None else "chat_approval_decided",
+                user["id"],
+                conversation_id=str(conversation_id),
+                is_new_conversation=is_new_conversation,
+                status=outcome["status"],
+                model=outcome["model"],
+                tools_used=turn.tools_used,
+                tool_count=len(turn.tools_used),
+                prompt_tokens=outcome["prompt_tokens"],
+                completion_tokens=outcome["completion_tokens"],
+                latency_ms=outcome["latency_ms"],
+                scoped_to_collection=body.collection_id is not None,
+                message_length=len(body.message),
+                decision=body.decision,
+            )
         except Exception:
             log.exception("Could not record the query trace for conversation %s", conversation_id)
 
@@ -762,6 +814,11 @@ def chat_agent(request: Request, body: ChatRequest, user: CurrentUser) -> Stream
     def generate():
         thread_id = body.thread_id or str(uuid.uuid4())
         yield f"data: {json.dumps({'thread_id': thread_id})}\n\n"
+        if not body.thread_id:
+            capture_event("conversation_created", user["id"], conversation_id=thread_id, surface="legacy_chat")
+        capture_event(
+            "chat_message_sent", user["id"], conversation_id=thread_id, surface="legacy_chat", message_length=len(body.message)
+        )
 
         config = {
             "configurable": {"thread_id": thread_id},
@@ -968,6 +1025,7 @@ async def remove_conversation(
         detail={"title": conversation.get("title")},
     )
     conn.commit()
+    capture_event("conversation_deleted", conversation_id=str(thread_id))
     return {"success": True}
 
 

@@ -29,6 +29,7 @@ from amber.models import DRIVE_SCOPE
 from amber.util import drive
 from amber.util.config import get_settings
 from amber.util.db import connect
+from amber.util.posthog import capture_event
 
 MAX_SOURCE_CHARS = 80_000
 MAX_WORKSPACE_CELLS = 2_000
@@ -427,6 +428,7 @@ def vector_search(
     user_email: Annotated[str, InjectedState("user_email")],
     user_domain: Annotated[str | None, InjectedState("user_domain")],
     collection_id: Annotated[str | None, InjectedState("collection_id")],
+    user_id: Annotated[str | None, InjectedState("user_id")] = None,
 ) -> tuple[str, dict]:
     """Search internal documents using hybrid vector cosine distance and full-text search."""
     _emit_task("find-files", "Find relevant files", "in_progress")
@@ -447,6 +449,14 @@ def vector_search(
             collection_ids=[uuid.UUID(collection_id)] if collection_id else None,
         )
 
+    capture_event(
+        "knowledge_search",
+        user_id,
+        result_count=len(results),
+        query_length=len(query),
+        scoped_to_collection=collection_id is not None,
+        distinct_document_count=len({str(r["document_id"]) for r in results if r.get("document_id")}),
+    )
     if not results:
         _emit_task("find-files", "Find relevant files", "completed")
         return "No relevant internal documents found.", {"sources": []}

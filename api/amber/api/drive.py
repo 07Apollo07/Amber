@@ -16,7 +16,7 @@ from amber.ingest.pipeline import IndexingError, index_document_content, mark_do
 from amber.models import can_import_folders
 from amber.util import drive, drive_sync
 from amber.util.config import get_settings
-from amber.util.posthog import get_posthog_client
+from amber.util.posthog import capture_event, get_posthog_client
 from amber.util.ratelimit import limit
 from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep
 
@@ -188,7 +188,7 @@ def import_drive_files(
             # The sync context is transaction-local, so the commit above cleared it. Without it the chunks
             # policy can't see the document and every chunk insert is rejected.
             repository.set_drive_sync_context(conn)
-            index_document_content(conn, doc_id, file_bytes, mime_type, parse_name)
+            chunk_count = index_document_content(conn, doc_id, file_bytes, mime_type, parse_name)
 
             # Mark as successfully indexed
             repository.update_document_status(conn, doc_id, "indexed")
@@ -197,11 +197,28 @@ def import_drive_files(
             apply_organization(conn, user, doc_id, collection=req.collection, tags=req.tags)
 
             imported.append({"document_id": str(doc_id), "file_id": file_id, "title": title})
+            capture_event(
+                "document_indexed",
+                user["id"],
+                source="drive_import",
+                file_type=file_type,
+                mime_type=mime_type,
+                file_size_bytes=size_bytes,
+                chunk_count=chunk_count,
+                shared_with_count=len(grants),
+            )
         except Exception as exc:
             # One bad file shouldn't stop the rest. Keep it, flagged failed with the reason, when it got far enough
             # to have a document row; otherwise it only appears in the response.
             message = str(exc) if isinstance(exc, IndexingError) else f"Failed while importing from Google Drive: {type(exc).__name__}: {exc}"
             log.warning("Importing Drive file %s failed: %s", file_id, message)
+            capture_event(
+                "document_index_failed",
+                user["id"],
+                source="drive_import",
+                error_type=type(exc).__name__,
+                failed_after_save=doc_id is not None,
+            )
             if doc_id:
                 try:
                     mark_document_failed(conn, doc_id, message)
@@ -234,8 +251,7 @@ def import_drive_files(
             "drive_files_imported",
             properties={
                 "requested_count": len(req.file_ids),
-                "imported_count": len(imported),
-                "skipped_count": len(skipped),
+                "imported_count": len(imported),                "skipped_count": len(skipped),
                 "failed_count": len(failed),
                 "has_collection": bool((req.collection or "").strip()),
                 "tag_count": len(req.tags),

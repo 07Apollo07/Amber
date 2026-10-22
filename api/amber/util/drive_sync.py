@@ -14,6 +14,7 @@ from amber.ingest import settings as indexing_settings
 from amber.util import drive
 from amber.util.config import Settings
 from amber.util.db import Connection
+from amber.util.posthog import capture_event
 
 log = logging.getLogger(__name__)
 WATCH_RENEWAL_WINDOW = timedelta(hours=24)
@@ -262,6 +263,8 @@ def process_drive_changes(conn: Connection, sync_state: dict[str, Any]) -> int:
 
     repository.advance_drive_sync_cursor(conn, user_id, next_start_token)
     conn.commit()
+    if processed_files:
+        capture_event("drive_permissions_synced", user_id, changed_file_count=len(processed_files))
     return len(processed_files)
 
 
@@ -283,6 +286,7 @@ def reindex_due_files(conn: Connection, settings: Settings, *, limit: int = 20) 
         except Exception as exc:
             conn.rollback()
             log.warning("Re-indexing Drive file %s failed: %s: %s", item["drive_file_id"], type(exc).__name__, exc)
+            capture_event("document_index_failed", item["user_id"], source="drive_reindex", error_type=type(exc).__name__)
             try:
                 if isinstance(exc, pipeline.IndexingError):
                     repository.update_document_status(conn, document_id, "failed", status_message=str(exc)[:2000])
@@ -324,7 +328,7 @@ def _reindex_one(conn: Connection, item: dict[str, Any]) -> str:
     repository.update_document_status(conn, document_id, "indexing")
     conn.commit()
     repository.set_app_user_context(conn, user["email"], user.get("domain"))
-    pipeline.index_document_content(
+    chunk_count = pipeline.index_document_content(
         conn, document_id, downloaded["data"], downloaded["mime_type"], downloaded["parse_name"]
     )
     repository.update_document_content(
@@ -337,6 +341,14 @@ def _reindex_one(conn: Connection, item: dict[str, Any]) -> str:
     repository.update_document_status(conn, document_id, "indexed")
     repository.finish_reindex(conn, document_id, item["last_change_at"])
     conn.commit()
+    capture_event(
+        "document_indexed",
+        user_id,
+        source="drive_reindex",
+        mime_type=downloaded["mime_type"],
+        file_size_bytes=len(downloaded["data"]),
+        chunk_count=chunk_count,
+    )
     return "reindexed"
 
 

@@ -177,7 +177,7 @@ def test_agent_live_session_relays_audio_context_and_tool_calls(monkeypatch: pyt
     monkeypatch.setattr(agent_api.genai, "Client", FakeClient)
     settings = Settings(env="test", gemini_live_api_key=SecretStr("live-key"), gemini_live_model="gemini-live")
 
-    asyncio.run(agent_api._run_live_session(socket, settings))
+    asyncio.run(agent_api._run_live_session(socket, settings, "user-1"))
 
     assert connects[0][0] == "gemini-live"
     assert connects[0][1].system_instruction.parts[0].text.endswith("User: hi")
@@ -200,7 +200,7 @@ def test_agent_live_session_relays_audio_context_and_tool_calls(monkeypatch: pyt
 def test_agent_live_session_must_start_with_context() -> None:
     socket = _FakeLiveSocket([{"type": "audio", "data": ""}])
     with pytest.raises(agent_api._LiveSessionEnded):
-        asyncio.run(agent_api._run_live_session(socket, Settings(env="test")))
+        asyncio.run(agent_api._run_live_session(socket, Settings(env="test"), "user-1"))
 
 
 def test_agent_graph_uses_model_from_run_config(monkeypatch: pytest.MonkeyPatch) -> None:

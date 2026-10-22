@@ -20,6 +20,7 @@ from amber.agent import settings as agent_settings
 from amber.api import agent as agent_api
 from amber.ingest import settings as indexing_settings
 from amber.util import audit
+from amber.util.posthog import capture_event
 from amber.util.security import AdminUser, CsrfProtected, DbDep, SettingsDep
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -111,6 +112,7 @@ def add_user(admin: AdminUser, conn: DbDep, request: Request, req: NewUser) -> d
     )
     audit.record(conn, request, "admin.add_user", user=admin, target=email, detail={"role": req.role})
     conn.commit()
+    capture_event("admin_user_added", admin["id"], role=req.role)
     row = next(r for r in repository.list_users_with_counts(conn) if r["id"] == created["id"])
     return {"user": _serialize_user(row)}
 
@@ -132,6 +134,14 @@ def update_user(admin: AdminUser, conn: DbDep, request: Request, user_id: uuid.U
         detail={"role": req.role, "status": req.status, "was": {"role": target["role"], "status": target["status"]}},
     )
     conn.commit()
+    capture_event(
+        "admin_user_updated",
+        admin["id"],
+        role=req.role,
+        status=req.status,
+        previous_role=target["role"],
+        previous_status=target["status"],
+    )
     return {"success": True}
 
 
@@ -148,6 +158,7 @@ def delete_user(admin: AdminUser, conn: DbDep, request: Request, user_id: uuid.U
         conn, request, "admin.delete_user", user=admin, target=target["email"], detail={"documents_removed": int(owned)}
     )
     conn.commit()
+    capture_event("admin_user_deleted", admin["id"], documents_removed=int(owned))
     return {"success": True, "documents_removed": int(owned)}
 
 

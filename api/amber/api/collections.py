@@ -236,6 +236,12 @@ def delete_collection(user: CurrentUser, conn: DbDep, collection_id: uuid.UUID) 
     repository.delete_collection(conn, collection_id)
     _audit(conn, user, "delete_collection", collection_id, {"name": collection["name"], "failed": len(failures)})
     conn.commit()
+    client = get_posthog_client()
+    if client:
+        client.capture(
+            "collection_deleted",
+            properties={"document_count": len(documents), "member_count": len(members), "failed_count": len(failures)},
+        )
     return {"success": True, "failed": failures}
 
 

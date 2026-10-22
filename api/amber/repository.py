@@ -726,6 +726,11 @@ def get_chunks_for_document(conn: Connection, document_id: uuid.UUID) -> list[Ro
     )
 
 
+def count_chunks_for_document(conn: Connection, document_id: uuid.UUID) -> int:
+    row = fetch_one(conn, "SELECT count(*) AS n FROM chunks WHERE document_id = %(id)s", {"id": document_id})
+    return int(row["n"]) if row else 0
+
+
 def delete_chunks_for_document(conn: Connection, document_id: uuid.UUID) -> None:
     execute(conn, "DELETE FROM chunks WHERE document_id = %(document_id)s", {"document_id": document_id})
 

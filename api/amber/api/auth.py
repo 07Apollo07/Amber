@@ -29,7 +29,7 @@ from amber.util.crypto import decrypt_token, encrypt_token
 from amber.util.db import Connection
 from amber.util.firebase import SessionInvalid
 from amber.util.google_oauth import OAuthError, RevokeFailed, new_pkce_pair
-from amber.util.posthog import get_posthog_client
+from amber.util.posthog import capture_event, get_posthog_client
 from amber.util.ratelimit import limit
 from amber.util.security import (
     CsrfProtected,
@@ -174,10 +174,19 @@ def _upsert_user(conn: Connection, settings: Settings, identity: dict, firebase_
         if pending is not None:
             repository.claim_pending_user(conn, pending["id"], google_sub=identity["sub"])
             existing = repository.lock_user_by_google_sub(conn, identity["sub"])
+            capture_event("user_signed_up", pending["id"], invited_by_admin=True, role=pending["role"])
     if existing is None:
         role = "admin" if identity["email"] in settings.bootstrap_admins else "member"
         created = repository.insert_user(conn, google_sub=identity["sub"], role=role, **profile)
         if created is not None:
+            capture_event(
+                "user_signed_up",
+                created["id"],
+                invited_by_admin=False,
+                role=role,
+                is_bootstrap_admin=role == "admin",
+                email_domain_type="workspace" if identity["domain"] else "personal",
+            )
             return created
         existing = repository.lock_user_by_google_sub(conn, identity["sub"])  # lost a race: use the winner's row
         if existing is None:
