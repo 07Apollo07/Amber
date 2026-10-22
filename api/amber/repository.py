@@ -605,6 +605,26 @@ def list_documents(
     )
 
 
+def get_user_documents_with_drive_ids(
+    conn: Connection,
+    user_id: uuid.UUID,
+) -> list[Row]:
+    """Returns all documents owned by the user that have a drive_file_id.
+    Used for building the virtual Drive folder tree."""
+    return fetch_all(
+        conn,
+        """
+        SELECT id, drive_file_id, title
+        FROM documents
+        WHERE owner_id = %(user_id)s
+          AND drive_file_id IS NOT NULL
+          AND drive_file_id <> ''
+        ORDER BY created_at DESC
+        """,
+        {"user_id": user_id},
+    )
+
+
 def delete_document(conn: Connection, document_id: uuid.UUID) -> None:
     execute(conn, "DELETE FROM documents WHERE id = %(id)s", {"id": document_id})
 

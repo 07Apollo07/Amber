@@ -56,6 +56,143 @@ def picker_token(user: CurrentUser, conn: DbDep) -> dict[str, Any]:
     }
 
 
+@router.get("/imported-folders", dependencies=[_picker_limit])
+def get_imported_folders(user: CurrentUser, conn: DbDep) -> dict[str, Any]:
+    """Build virtual folder tree from current Drive parents of user's imported files.
+
+    Uses batch requests to fetch parents for all files in one HTTP call.
+    Returns a tree structure: {path: {name, children: {}, file_ids: []}}
+    and list of uncategorized file IDs (no Drive parents found).
+    """
+    drive_service = drive.build_drive_service(user["id"], conn)
+    if not drive_service:
+        raise HTTPException(status_code=400, detail="Google Drive is not connected for this user")
+
+    # Set RLS context so policies allow access to user's documents
+    repository.set_app_user_context(conn, user["email"], user.get("domain"))
+
+    docs = repository.get_user_documents_with_drive_ids(conn, user["id"])
+    print(f"[imported-folders] User {user['id']} has {len(docs)} docs with drive_file_id")
+    for d in docs:
+        print(f"[imported-folders]   doc: id={d['id']} drive_file_id={d['drive_file_id']} title={d['title']}")
+
+    # Debug: also check what list_accessible_documents returns
+    from amber import repository as repo_module
+    accessible = repo_module.list_accessible_documents(
+        conn, user_id=user["id"], user_email=user["email"], user_domain=user.get("domain")
+    )
+    print(f"[imported-folders] list_accessible_documents returns {len(accessible)} docs")
+    for a in accessible:
+        if a.get("drive_file_id"):
+            print(f"[imported-folders]   accessible: id={a['id']} drive_file_id={a['drive_file_id']} title={a['title']} owner_id={a.get('owner_id')} is_owner={a.get('is_owner')}")
+
+    if not docs:
+        return {"tree": {}, "uncategorized": []}
+
+    # Batch request: fetch parents for all files in one HTTP call
+    batch = drive_service.new_batch_http_request()
+    results: dict[str, list[str]] = {}
+
+    def make_callback(doc_id: str):
+        def callback(request_id, response, exception):
+            if exception:
+                log.warning("Batch get parents failed for doc %s: %s", doc_id, exception)
+                results[doc_id] = []
+            else:
+                results[doc_id] = response.get("parents", [])
+        return callback
+
+    for doc in docs:
+        batch.add(
+            drive_service.files().get(
+                fileId=doc["drive_file_id"],
+                fields="parents",
+            ),
+            callback=make_callback(doc["id"]),
+        )
+
+    batch.execute()
+    print(f"[imported-folders] Batch results (parents per doc): {results}")
+
+    # Resolve folder paths (with caching to avoid duplicate calls)
+    folder_cache: dict[str, dict] = {}
+    # Track folders currently being resolved to detect cycles (e.g., root folder parent = "root")
+    resolving: set[str] = set()
+
+    def resolve_folder_path(folder_id: str) -> str:
+        if folder_id in folder_cache:
+            return folder_cache[folder_id]["path"]
+        # Detect cycle: if we're already resolving this folder, break the cycle
+        if folder_id in resolving:
+            # This handles the "root" folder whose parent is itself
+            return "My Drive"
+        try:
+            meta = drive_service.files().get(
+                fileId=folder_id, fields="name,parents"
+            ).execute()
+        except Exception as exc:
+            log.warning("Failed to resolve folder %s: %s", folder_id, exc)
+            folder_cache[folder_id] = {"name": "Unknown", "parent_id": None, "path": "Unknown"}
+            return "Unknown"
+
+        name = meta.get("name", "Unknown")
+        parent_id = meta.get("parents", [None])[0]
+        # Mark as currently resolving to detect cycles
+        resolving.add(folder_id)
+        try:
+            if parent_id and parent_id != folder_id:
+                parent_path = resolve_folder_path(parent_id)
+                path = f"{parent_path} / {name}"
+            else:
+                # No parent, or parent is self (root folder) - this is the top level
+                path = name
+        finally:
+            resolving.discard(folder_id)
+        folder_cache[folder_id] = {"name": name, "parent_id": parent_id, "path": path}
+        return path
+
+    file_to_paths: dict[str, list[str]] = {}
+    for doc in docs:
+        doc_id = doc["id"]
+        parents = results.get(doc_id, [])
+        if parents:
+            paths = [resolve_folder_path(p) for p in parents]
+            if paths:
+                file_to_paths[doc_id] = paths
+    print(f"[imported-folders] file_to_paths: {file_to_paths}")
+
+    # Build tree structure
+    tree = _build_folder_tree(file_to_paths)
+    uncategorized = [doc["id"] for doc in docs if doc["id"] not in file_to_paths]
+    print(f"[imported-folders] tree: {tree}")
+    print(f"[imported-folders] uncategorized: {uncategorized}")
+
+    return {"tree": tree, "uncategorized": uncategorized}
+
+
+def _build_folder_tree(file_to_paths: dict[str, list[str]]) -> dict[str, Any]:
+    """Build nested folder tree from file -> paths mapping.
+    Returns: {path: {"name": folder_name, "children": {}, "file_ids": []}}
+    """
+    tree: dict[str, Any] = {}
+
+    for doc_id, paths in file_to_paths.items():
+        for path in paths:
+            parts = path.split(" / ")
+            current = tree
+            for i, part in enumerate(parts):
+                if part not in current:
+                    current[part] = {"name": part, "children": {}, "file_ids": []}
+                if i == len(parts) - 1:
+                    # Last part: add file to THIS folder node
+                    current[part]["file_ids"].append(doc_id)
+                else:
+                    # Not last: descend into children
+                    current = current[part]["children"]
+
+    return tree
+
+
 class DriveFolderRequest(BaseModel):
     folder_ids: list[str] = Field(min_length=1, max_length=50)
 

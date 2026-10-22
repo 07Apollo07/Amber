@@ -10,6 +10,19 @@ function readCsrfToken(): string {
   return CSRF_COOKIES.map((name) => cookies.get(name)).find(Boolean) ?? ""
 }
 
+/** GET call to the API (no CSRF needed for reads). */
+export async function apiGet(path: string): Promise<Response> {
+  const res = await fetch(path, {
+    method: "GET",
+    credentials: "same-origin",
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null)
+    throw new Error(detail?.detail ?? `Request failed (${res.status})`)
+  }
+  return res
+}
+
 /** State-changing call to the API. Sends the double-submit CSRF token the API requires. */
 export async function apiPost(path: string, body?: unknown): Promise<Response> {
   const res = await fetch(path, {

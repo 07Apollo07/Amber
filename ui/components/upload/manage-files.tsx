@@ -1,7 +1,7 @@
 "use client"
 
-import { useMemo, useState } from "react"
-import { ChevronRight, Folder, FolderOpen, FolderPlus, Inbox, MoreHorizontal, Pencil, Search, Share2, Trash2, X } from "lucide-react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import { ChevronRight, Folder, FolderOpen, FolderPlus, Inbox, MoreHorizontal, Pencil, RefreshCw, Search, Share2, Trash2, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { EmptyState } from "@/components/app/empty-state"
@@ -11,7 +11,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { apiPut } from "@/lib/api"
+import { apiGet, apiPut } from "@/lib/api"
 import type { Collection, UploadRow } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -21,6 +21,17 @@ import { FileRow } from "./file-row"
 type Dialog =
   | { kind: "create" }
   | { kind: "rename" | "share" | "delete"; collection: Collection }
+
+type DriveFolderNode = {
+  name: string
+  children: Record<string, DriveFolderNode>
+  file_ids: string[]
+}
+
+type DriveFoldersResponse = {
+  tree: Record<string, DriveFolderNode>
+  uncategorized: string[]
+}
 
 export function ManageFiles({
   pending,
@@ -88,6 +99,46 @@ export function ManageFiles({
     }
   }
 
+  // Drive folders state
+  const [driveFoldersTree, setDriveFoldersTree] = useState<Record<string, DriveFolderNode>>({})
+  const [uncategorizedIds, setUncategorizedIds] = useState<string[]>([])
+  const [driveFoldersLoading, setDriveFoldersLoading] = useState(false)
+  const [driveFoldersClosed, setDriveFoldersClosed] = useState<Set<string>>(new Set())
+
+  const fetchDriveFolders = useCallback(async () => {
+    setDriveFoldersLoading(true)
+    try {
+      const res = await apiGet("/api/drive/imported-folders")
+      const data = (await res.json()) as DriveFoldersResponse
+      // Backend already returns nested tree with "My Drive" as root key
+      setDriveFoldersTree(data.tree)
+      setUncategorizedIds(data.uncategorized)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to load Drive folders")
+      setDriveFoldersTree({})
+      setUncategorizedIds([])
+    } finally {
+      setDriveFoldersLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchDriveFolders()
+  }, [fetchDriveFolders])
+
+  function toggleDriveFolder(path: string, open: boolean) {
+    setDriveFoldersClosed((current) => {
+      const next = new Set(current)
+      if (open) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
+
+  function getFullPath(node: DriveFolderNode, currentPath: string): string {
+    return currentPath ? `${currentPath} / ${node.name}` : node.name
+  }
+
   const renderFileRow = (row: UploadRow) => (
     <FileRow
       key={row.id}
@@ -119,6 +170,7 @@ export function ManageFiles({
           <TabsList>
             <TabsTrigger value="files">File management</TabsTrigger>
             <TabsTrigger value="collections">Collections</TabsTrigger>
+            <TabsTrigger value="drive-folders">Drive folders</TabsTrigger>
           </TabsList>
 
           <TabsContent value="files" className="space-y-4">
@@ -265,6 +317,67 @@ export function ManageFiles({
               </div>
             )}
           </TabsContent>
+
+          <TabsContent value="drive-folders" className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-medium">Drive folder structure (imported files only)</h3>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  Folders reflect current Drive locations. Files moved to unimported folders won't appear here.
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={fetchDriveFolders}
+                  disabled={driveFoldersLoading}
+                >
+                  <RefreshCw className={cn("size-4", driveFoldersLoading && "animate-spin")} />
+                  Refresh
+                </Button>
+              </div>
+            </div>
+
+            {driveFoldersLoading ? (
+              <div className="py-8 text-center text-sm text-muted-foreground">
+                Loading Drive folders…
+              </div>
+            ) : Object.keys(driveFoldersTree).length > 0 ? (
+              <>
+                {Object.entries(driveFoldersTree).map(([rootName, rootNode]) => (
+                  <DriveFolderTree
+                    key={rootName}
+                    node={rootNode}
+                    path={rootName}
+                    saved={saved}
+                    collections={collections}
+                    onManage={onManage}
+                    onRemove={onRemovePending}
+                    onToggleCollection={toggleCollection}
+                    onChanged={onChanged}
+                    closed={driveFoldersClosed}
+                    onToggle={toggleDriveFolder}
+                  />
+                ))}
+                {uncategorizedIds.length > 0 && (
+                  <section aria-label="Uncategorized" className="border-t pt-4">
+                    <h4 className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                      Uncategorized ({uncategorizedIds.length})
+                    </h4>
+                    <ul className="divide-y divide-border/60 overflow-hidden rounded-xl border bg-card/40">
+                      {uncategorizedIds
+                        .map((id) => saved.find((r) => r.id === id))
+                        .filter((r): r is UploadRow => r !== undefined)
+                        .map(renderFileRow)}
+                    </ul>
+                  </section>
+                )}
+              </>
+            ) : (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                No imported files with Drive folder information found.
+              </p>
+            )}
+          </TabsContent>
         </Tabs>
       )}
 
@@ -351,6 +464,96 @@ function FolderGroup({
               />
             ))}
           </ul>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
+function DriveFolderTree({
+  node,
+  path,
+  saved,
+  collections,
+  onManage,
+  onRemove,
+  onToggleCollection,
+  onChanged,
+  closed,
+  onToggle,
+}: {
+  node: DriveFolderNode
+  path: string
+  saved: UploadRow[]
+  collections: Collection[]
+  onManage: (row: UploadRow) => void
+  onRemove: (id: string) => void
+  onToggleCollection: (row: UploadRow, collectionId: string, included: boolean) => Promise<void>
+  onChanged: () => void
+  closed: Set<string>
+  onToggle: (path: string, open: boolean) => void
+}) {
+  const isOpen = !closed.has(path)
+  const childEntries = Object.entries(node.children).sort(([a], [b]) => a.localeCompare(b))
+
+  const renderFileRow = (row: UploadRow) => (
+    <FileRow
+      key={row.id}
+      row={row}
+      collections={collections}
+      onRemove={onRemove}
+      onManage={onManage}
+      onToggleCollection={(file, collectionId, included) =>
+        void onToggleCollection(file, collectionId, included)
+      }
+      onChanged={onChanged}
+    />
+  )
+
+  return (
+    <Collapsible open={isOpen} onOpenChange={(open) => onToggle(path, open)} className="overflow-hidden rounded-2xl border bg-card/40">
+      <div className="flex items-center gap-1 pr-2">
+        <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-2 p-3 text-left hover:bg-muted/40">
+          <ChevronRight className={cn("size-4 shrink-0 text-muted-foreground transition-transform", isOpen && "rotate-90")} />
+          <FolderOpen className="size-5 shrink-0 fill-amber-500/20 text-amber-500" />
+          <span className="truncate text-sm font-medium">{node.name}</span>
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {node.file_ids.length} {node.file_ids.length === 1 ? "file" : "files"}
+          </span>
+        </CollapsibleTrigger>
+      </div>
+      <CollapsibleContent>
+        {childEntries.length > 0 && (
+          <div className="border-t pl-4">
+            {childEntries.map(([childName, childNode]) => (
+              <DriveFolderTree
+                key={childName}
+                node={childNode}
+                path={`${path} / ${childName}`}
+                saved={saved}
+                collections={collections}
+                onManage={onManage}
+                onRemove={onRemove}
+                onToggleCollection={onToggleCollection}
+                onChanged={onChanged}
+                closed={closed}
+                onToggle={onToggle}
+              />
+            ))}
+          </div>
+        )}
+        {node.file_ids.length > 0 && (
+          <ul className="divide-y divide-border/60 border-t">
+            {node.file_ids
+              .map((id) => saved.find((r) => r.id === id))
+              .filter((r): r is UploadRow => r !== undefined)
+              .map(renderFileRow)}
+          </ul>
+        )}
+        {childEntries.length === 0 && node.file_ids.length === 0 && (
+          <p className="border-t px-4 py-4 text-sm text-muted-foreground">
+            This folder is empty.
+          </p>
         )}
       </CollapsibleContent>
     </Collapsible>
