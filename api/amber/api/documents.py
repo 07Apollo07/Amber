@@ -13,6 +13,8 @@ from amber import repository
 from amber.ingest import settings as indexing_settings
 from amber.ingest.pipeline import process_document_upload
 from amber.util import drive, drive_sync
+from amber.util.posthog import get_posthog_client
+from amber.util.posthog_logs import posthog_log
 from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -223,6 +225,15 @@ def organize_document(user: CurrentUser, conn: DbDep, document_id: uuid.UUID, re
     _require_owned(conn, user, document_id)
     apply_organization(conn, user, document_id, collection=req.collection, tags=req.tags)
     conn.commit()
+    client = get_posthog_client()
+    if client:
+        client.capture(
+            "document_organized",
+            properties={
+                "has_collection": bool((req.collection or "").strip()),
+                "tag_count": len(_clean_tags(req.tags)),
+            },
+        )
     return {"success": True}
 
 
@@ -250,6 +261,12 @@ def update_document_access(user: CurrentUser, conn: DbDep, document_id: uuid.UUI
         ip=None,
     )
     conn.commit()
+    client = get_posthog_client()
+    if client:
+        client.capture(
+            "document_access_updated",
+            properties={"sharing_option": access[0], "additional_member_count": len(access[1]) - 1},
+        )
     return {"success": True}
 
 
@@ -318,16 +335,50 @@ def upload_document(
             ip=None,
         )
         conn.commit()
+        client = get_posthog_client()
+        if client:
+            client.capture(
+                "document_uploaded",
+                properties={
+                    "mime_type": mime_type,
+                    "file_size_bytes": len(file_bytes),
+                    "sharing_option": access[0],
+                    "additional_member_count": len(access[1]) - 1,
+                    "has_collection": bool(collection.strip()),
+                    "tag_count": len(_clean_tags(split_csv(tags))),
+                },
+            )
+        posthog_log.info(
+            "Document upload completed",
+            extra={
+                "event": "document_upload_completed",
+                "mime_type": mime_type,
+                "file_size_bytes": len(file_bytes),
+                "sharing_option": access[0],
+                "additional_member_count": len(access[1]) - 1,
+                "has_collection": bool(collection.strip()),
+                "tag_count": len(_clean_tags(split_csv(tags))),
+            },
+        )
         return result
     except Exception as exc:
         conn.rollback()
+        posthog_log.error(
+            "Document upload failed",
+            extra={
+                "event": "document_upload_failed",
+                "mime_type": mime_type,
+                "file_size_bytes": len(file_bytes),
+                "sharing_option": access[0],
+            },
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.delete("/{document_id}", dependencies=[CsrfProtected])
 def delete_document_endpoint(user: CurrentUser, conn: DbDep, document_id: uuid.UUID) -> dict[str, Any]:
     """Deletes a document and its chunks."""
-    _require_owned(conn, user, document_id)  # only the owner can delete, however many people can see it
+    doc = _require_owned(conn, user, document_id)  # only the owner can delete, however many people can see it
 
     repository.delete_chunks_for_document(conn, document_id)
     repository.delete_document(conn, document_id)
@@ -342,4 +393,7 @@ def delete_document_endpoint(user: CurrentUser, conn: DbDep, document_id: uuid.U
         ip=None,
     )
     conn.commit()
+    client = get_posthog_client()
+    if client:
+        client.capture("document_deleted", properties={"origin": doc["origin"]})
     return {"success": True, "document_id": str(document_id)}

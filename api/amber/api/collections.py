@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from amber import repository
 from amber.util import drive
+from amber.util.posthog import get_posthog_client
 from amber.util.security import CsrfProtected, CurrentUser, DbDep
 
 router = APIRouter(prefix="/api/collections", tags=["collections"])
@@ -177,6 +178,9 @@ def create_collection(user: CurrentUser, conn: DbDep, req: CollectionName) -> di
         raise HTTPException(status_code=409, detail=f"You already have a collection called “{name}”")
     row = repository.create_collection(conn, user["id"], name)
     conn.commit()
+    client = get_posthog_client()
+    if client:
+        client.capture("collection_created")
     return {"id": str(row["id"]), "name": row["name"], "is_owner": True, "role": "owner"}
 
 
@@ -304,6 +308,18 @@ def share_collection(user: CurrentUser, conn: DbDep, collection_id: uuid.UUID, r
         {"name": collection["name"], "added": added, "removed": removed, "failed": len(failed)},
     )
     conn.commit()
+    client = get_posthog_client()
+    if client:
+        client.capture(
+            "collection_shared",
+            properties={
+                "access_kind": req.kind,
+                "added_count": added,
+                "removed_count": removed,
+                "failed_count": len(failed),
+                "document_count": len(documents),
+            },
+        )
     return {"success": True, "added": added, "removed": removed, "failed": failed}
 
 

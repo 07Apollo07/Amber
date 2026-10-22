@@ -7,6 +7,8 @@ from amber.agent.graph import create_agent_graph
 from amber.api import admin, agent, auth, collections, documents, drive, me
 from amber.util.config import Settings, get_settings
 from amber.util.firebase import init_firebase
+from amber.util.posthog import PostHogRequestContextMiddleware, initialize_posthog
+from amber.util.posthog_logs import initialize_posthog_logs, shutdown_posthog_logs
 from amber.util.ratelimit import RateLimited, rate_limited_response
 
 
@@ -18,6 +20,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.settings = settings
         app.state.rate_hits = {}
+        app.state.posthog_client = initialize_posthog(settings)
+        initialize_posthog_logs(settings)
         if settings.env != "test":  # tests never call Firebase, so they need no Google credentials
             init_firebase(settings)
 
@@ -62,6 +66,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         yield
 
+        shutdown_posthog_logs()
+
+        if app.state.posthog_client:
+            app.state.posthog_client.flush()
+            app.state.posthog_client.shutdown()
+
         if hasattr(app.state, "db_pool") and app.state.db_pool:
             try:
                 app.state.db_pool.close()
@@ -86,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers.setdefault("Cache-Control", "no-store")  # API responses are per-user
         return response
 
+    app.add_middleware(PostHogRequestContextMiddleware)
     app.add_exception_handler(RateLimited, rate_limited_response)  # type: ignore[arg-type]
 
     @app.get("/api/health", include_in_schema=False)

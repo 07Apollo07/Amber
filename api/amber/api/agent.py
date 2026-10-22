@@ -20,10 +20,11 @@ from pydantic import BaseModel, Field
 
 from amber import repository
 from amber.agent import settings as agent_settings
-from amber.agent.graph import create_agent_graph, get_agent_model
+from amber.agent.graph import create_agent_graph, create_posthog_callback, get_agent_model
 from amber.agent.trace import TurnTrace
 from amber.util import audit, db
 from amber.util.config import Settings
+from amber.util.posthog import get_posthog_client
 from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep, cookie_names, verified_session
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
@@ -264,7 +265,7 @@ async def live_agent(websocket: WebSocket) -> None:
     try:
         # The admin's limit applies, but never above the server's own cap.
         limit = min(voice.max_session_minutes * 60, settings.gemini_live_max_session_seconds)
-        await asyncio.wait_for(_run_live_session(websocket, settings, voice.voice), timeout=limit)
+        await asyncio.wait_for(_run_live_session(websocket, settings, str(user["id"]), voice.voice), timeout=limit)
     except TimeoutError:
         await _close_live(websocket, 1000, "Voice session time limit reached")
     except _LiveSessionEnded as ended:
@@ -312,7 +313,9 @@ async def _receive_live(websocket: WebSocket) -> dict[str, Any]:
     return event
 
 
-async def _run_live_session(websocket: WebSocket, settings: Settings, voice: str | None = None) -> None:
+async def _run_live_session(
+    websocket: WebSocket, settings: Settings, user_id: str, voice: str | None = None
+) -> None:
     try:
         first = await asyncio.wait_for(_receive_live(websocket), timeout=_LIVE_START_TIMEOUT_SECONDS)
     except TimeoutError as exc:
@@ -322,7 +325,52 @@ async def _run_live_session(websocket: WebSocket, settings: Settings, voice: str
     state: dict[str, Any] = {"context": _live_context(first.get("context", "")), "handle": None}
     pending_calls: dict[str, str] = {}
     client = genai.Client(api_key=_live_api_key(settings))
+    ai_session_id = str(uuid.uuid4())
+    turn: dict[str, Any] = {}
     announced = False
+
+    def begin_turn() -> None:
+        if turn:
+            return
+        turn.update(
+            trace_id=str(uuid.uuid4()),
+            started_at=time.monotonic(),
+            input_parts=[],
+            output_parts=[],
+            tool_calls=[],
+            first_output_at=None,
+        )
+
+    def capture_turn() -> None:
+        if not turn:
+            return
+        posthog_client = get_posthog_client()
+        if posthog_client is not None:
+            output_content: list[dict[str, Any]] = []
+            if turn["output_parts"]:
+                output_content.append({"type": "text", "text": "\n".join(turn["output_parts"])})
+            output_content.extend(
+                {"type": "function", "function": {"name": name, "arguments": {}}}
+                for name in turn["tool_calls"]
+            )
+            properties: dict[str, Any] = {
+                "$ai_trace_id": turn["trace_id"],
+                "$ai_session_id": ai_session_id,
+                "$ai_span_id": str(uuid.uuid4()),
+                "$ai_span_name": "gemini_live_turn",
+                "$ai_model": settings.gemini_live_model,
+                "$ai_provider": "gemini",
+                "$ai_input": [
+                    {"role": "user", "content": "\n".join(turn["input_parts"])}
+                ],
+                "$ai_output_choices": [{"role": "assistant", "content": output_content}],
+                "$ai_latency": time.monotonic() - turn["started_at"],
+                "$ai_stream": True,
+            }
+            if turn["first_output_at"] is not None:
+                properties["$ai_time_to_first_token"] = turn["first_output_at"] - turn["started_at"]
+            posthog_client.capture("$ai_generation", distinct_id=user_id, properties=properties)
+        turn.clear()
 
     while True:
         config = _live_connect_config(settings, state["context"], state["handle"], voice)
@@ -341,6 +389,7 @@ async def _run_live_session(websocket: WebSocket, settings: Settings, voice: str
                         except (TypeError, ValueError) as exc:
                             raise _LiveSessionEnded("Live voice audio must be base64") from exc
                         if audio:
+                            begin_turn()
                             await session.send_realtime_input(
                                 audio=types.Blob(data=audio, mime_type=f"audio/pcm;rate={_LIVE_INPUT_RATE}")
                             )
@@ -358,6 +407,8 @@ async def _run_live_session(websocket: WebSocket, settings: Settings, voice: str
                     elif kind == "text":
                         text = event.get("text")
                         if isinstance(text, str) and text.strip():
+                            begin_turn()
+                            turn["input_parts"].append(text.strip()[:2000])
                             await session.send_client_content(
                                 turns=types.Content(role="user", parts=[types.Part(text=text.strip()[:2000])]),
                                 turn_complete=True,
@@ -388,6 +439,18 @@ async def _run_live_session(websocket: WebSocket, settings: Settings, voice: str
                         if message.go_away:
                             go_away = True
                         for event in _live_events(message, pending_calls):
+                            if event["type"] == "input_transcript":
+                                begin_turn()
+                                turn["input_parts"].append(event["text"])
+                            elif event["type"] == "output_transcript":
+                                begin_turn()
+                                turn["output_parts"].append(event["text"])
+                                turn["first_output_at"] = turn["first_output_at"] or time.monotonic()
+                            elif event["type"] == "tool_call":
+                                begin_turn()
+                                turn["tool_calls"].append(event["name"])
+                            elif event["type"] == "turn_complete":
+                                capture_turn()
                             await websocket.send_text(json.dumps(event))
                         if go_away:
                             return state["handle"] is not None
@@ -600,6 +663,9 @@ async def stream_agent_v2(
             "title": title[:255],
             "tool": decided.get("tool"),
         }
+    posthog_callback = create_posthog_callback(str(user["id"]), thread_id, str(uuid.uuid4()))
+    if posthog_callback is not None:
+        config["callbacks"] = [posthog_callback]
     loop = asyncio.get_running_loop()
 
     def save_trace(outcome: dict[str, Any]) -> None:
@@ -701,6 +767,9 @@ def chat_agent(request: Request, body: ChatRequest, user: CurrentUser) -> Stream
             "configurable": {"thread_id": thread_id},
             "metadata": {"user_email": user["email"]}
         }
+        posthog_callback = create_posthog_callback(str(user["id"]), thread_id, str(uuid.uuid4()))
+        if posthog_callback is not None:
+            config["callbacks"] = [posthog_callback]
         try:
             tool_calls = []
             tool_results = []
@@ -929,6 +998,8 @@ def generate_conversation_title(
     if not first_user_message:
         raise HTTPException(status_code=400, detail="Conversation has no user message to title")
 
+    posthog_callback = create_posthog_callback(str(user["id"]), str(thread_id), str(uuid.uuid4()))
+    invoke_config = {"callbacks": [posthog_callback]} if posthog_callback is not None else None
     result = get_agent_model(settings).invoke(
         [
             SystemMessage(
@@ -937,7 +1008,8 @@ def generate_conversation_title(
                 "Use at most 8 words."
             ),
             HumanMessage(content=str(first_user_message)[:2000]),
-        ]
+        ],
+        config=invoke_config,
     )
     title_content = result.content
     if isinstance(title_content, list):

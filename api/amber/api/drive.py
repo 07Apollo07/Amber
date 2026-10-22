@@ -16,6 +16,7 @@ from amber.ingest.pipeline import IndexingError, index_document_content, mark_do
 from amber.models import can_import_folders
 from amber.util import drive, drive_sync
 from amber.util.config import get_settings
+from amber.util.posthog import get_posthog_client
 from amber.util.ratelimit import limit
 from amber.util.security import CsrfProtected, CurrentUser, DbDep, SettingsDep
 
@@ -227,6 +228,19 @@ def import_drive_files(
         ip=None,
     )
     conn.commit()
+    client = get_posthog_client()
+    if client:
+        client.capture(
+            "drive_files_imported",
+            properties={
+                "requested_count": len(req.file_ids),
+                "imported_count": len(imported),
+                "skipped_count": len(skipped),
+                "failed_count": len(failed),
+                "has_collection": bool((req.collection or "").strip()),
+                "tag_count": len(req.tags),
+            },
+        )
     return {
         "success": True,
         "imported": imported,

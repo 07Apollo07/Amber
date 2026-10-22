@@ -184,8 +184,9 @@ gcloud config set project $PROJECT_ID
    | `amber-gemini-api-key` | `AMBER_GEMINI_API_KEY` |
    | `amber-state-cookie-key` | `AMBER_STATE_COOKIE_KEY` (a new Fernet key, not the dev one) |
    | `amber-database-dsn` | `AMBER_DATABASE_DSN` |
+| `amber-posthog-api-key` | `AMBER_POSTHOG_API_KEY` (PostHog project token; with `AMBER_POSTHOG_HOST` set, backend analytics and log export turn on) |
 
-   Plain env vars: `AMBER_ENV=prod`, `AMBER_PUBLIC_BASE_URL=https://amber-web-<project-number>.<region>.run.app`, `AMBER_COOKIE_SECURE=true`, `AMBER_GOOGLE_OAUTH_CLIENT_ID`, `AMBER_FIREBASE_PROJECT_ID`, `AMBER_TOKEN_KMS_KEY`, `AMBER_BOOTSTRAP_ADMIN_EMAILS`, plus the Picker API key and project number (new settings added by the §6 code change). Leave `AMBER_TRUSTED_PROXIES` empty at first (audit-log IPs will show the proxy, not the user).
+   Plain env vars: `AMBER_ENV=prod`, `AMBER_PUBLIC_BASE_URL=https://amber-web-<project-number>.<region>.run.app`, `AMBER_COOKIE_SECURE=true`, `AMBER_GOOGLE_OAUTH_CLIENT_ID`, `AMBER_FIREBASE_PROJECT_ID`, `AMBER_TOKEN_KMS_KEY`, `AMBER_BOOTSTRAP_ADMIN_EMAILS`, `AMBER_POSTHOG_HOST`, plus the Picker API key and project number (new settings added by the §6 code change). Leave `AMBER_TRUSTED_PROXIES` empty at first (audit-log IPs will show the proxy, not the user).
 
 ---
 

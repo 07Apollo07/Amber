@@ -29,6 +29,7 @@ from amber.util.crypto import decrypt_token, encrypt_token
 from amber.util.db import Connection
 from amber.util.firebase import SessionInvalid
 from amber.util.google_oauth import OAuthError, RevokeFailed, new_pkce_pair
+from amber.util.posthog import get_posthog_client
 from amber.util.ratelimit import limit
 from amber.util.security import (
     CsrfProtected,
@@ -279,6 +280,15 @@ def google_callback(
         except Exception as exc:
             log.warning("Could not start Drive change notifications for user %s: %s", user["id"], exc)
 
+    client = get_posthog_client()
+    if client:
+        with client.new_context(fresh=True):
+            client.identify_context(str(user["id"]))
+            client.capture(
+                "user_logged_in",
+                properties={"drive_connected": drive_connected(has_refresh_token, tokens["scopes"])},
+            )
+
     response = _same_site_redirect(pending["return_to"])
     set_session_cookies(response, settings, session_cookie)
     _clear_state(response, settings)
@@ -299,6 +309,9 @@ def logout(request: Request, settings: SettingsDep, conn: DbDep) -> Response:
         user = repository.get_user_by_firebase_uid(conn, claims["uid"])
         audit.record(conn, request, "auth.logout", user=user)
         conn.commit()
+        client = get_posthog_client()
+        if client:
+            client.capture("user_logged_out", properties={"all_sessions": False})
     clear_session_cookies(response, settings)
     return response
 
@@ -309,6 +322,9 @@ def logout_all(request: Request, user: CurrentUser, settings: SettingsDep, conn:
     firebase.revoke_all_sessions(user["firebase_uid"])
     audit.record(conn, request, "auth.logout_all", user=user)
     conn.commit()
+    client = get_posthog_client()
+    if client:
+        client.capture("user_logged_out", properties={"all_sessions": True})
     response = Response(status_code=status.HTTP_204_NO_CONTENT)
     clear_session_cookies(response, settings)
     return response
@@ -344,4 +360,7 @@ def disconnect_drive(request: Request, user: CurrentUser, settings: SettingsDep,
         repository.delete_token(conn, user["id"])
     audit.record(conn, request, "drive.disconnect", user=user, detail={"revoked_at_google": revoked})
     conn.commit()
+    client = get_posthog_client()
+    if client:
+        client.capture("drive_disconnected", properties={"revoked_at_google": revoked})
     return {"revoked_at_google": revoked}

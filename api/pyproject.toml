@@ -29,6 +29,9 @@ dependencies = [
     "tiktoken>=0.8.0",
     "uvicorn[standard]>=0.54.0",
     "websockets<=13.1",
+    "posthog>=7.75.0",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-exporter-otlp>=1.45.1",
 ]
 
 [dependency-groups]

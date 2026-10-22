@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     # Gemini API Key for LLM and embeddings
     gemini_api_key: SecretStr = SecretStr("")
 
+    # PostHog server-side analytics (optional in production).
+    posthog_api_key: str = ""
+    posthog_host: str = ""
+
     # Google service-account key file used by google.auth.default() (Firebase Admin, KMS).
     # Read from GOOGLE_APPLICATION_CREDENTIALS (no AMBER_ prefix), in the environment or .env.
     # A relative path is resolved against the api folder. Unset: use the ambient credentials

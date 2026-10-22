@@ -12,6 +12,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
+from posthog.ai.langchain import CallbackHandler
 
 from amber.agent.tools import (
     apply_google_doc_updates,
@@ -45,6 +46,7 @@ from amber.agent.tools import (
     web_search,
 )
 from amber.util.config import get_settings
+from amber.util.posthog import get_posthog_client
 
 log = logging.getLogger(__name__)
 
@@ -123,6 +125,19 @@ def _handle_agent_tool_error(error: Exception) -> str:
         f"Tool execution failed ({type(error).__name__}). No successful result was returned. "
         "Do not claim the operation succeeded; adjust the request if the failure is recoverable, "
         "or explain the failure to the user."
+    )
+
+
+def create_posthog_callback(user_id: str, session_id: str, trace_id: str) -> CallbackHandler | None:
+    """Create one LangGraph callback for an authenticated conversation turn."""
+    client = get_posthog_client()
+    if client is None:
+        return None
+    return CallbackHandler(
+        client=client,
+        distinct_id=user_id,
+        trace_id=trace_id,
+        properties={"$ai_session_id": session_id},
     )
 
 
